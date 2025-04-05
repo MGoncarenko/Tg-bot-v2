@@ -1,0 +1,12 @@
+# Конфігураційні файли з API ключами
+config.py
+data-avatar-455714-e9-2c45f3635e40.json
+
+# Віртуальне середовище
+venv/
+env/
+*.venv/
+
+# Файли кешу Python
+__pycache__/
+*.py[cod]
