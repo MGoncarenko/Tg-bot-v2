@@ -1,0 +1,9 @@
+pyTelegramBotAPI
+gspread
+oauth2client
+opencv-python
+numpy
+pyzbar
+schedule
+pytz
+flask
