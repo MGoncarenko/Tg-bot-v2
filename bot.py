@@ -135,7 +135,7 @@ def clear_ttn_sheet():
 def run_clear_ttn_sheet_with_tz():
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
-    if now_kiev.strftime("%H:%M") == "13:25":
+    if now_kiev.strftime("%H:%M") == "00:00":
         clear_ttn_sheet()
 
 # ======= Команди Telegram-бота =======
