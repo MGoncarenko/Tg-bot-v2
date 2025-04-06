@@ -331,7 +331,7 @@ def send_subscription_notifications():
 
 def run_scheduler():
     schedule.every().minute.do(send_subscription_notifications)
-    schedule.every().day.at("00:00").do(clear_ttn_sheet)
+    schedule.every().day.at("13:05").do(clear_ttn_sheet)
     while True:
         schedule.run_pending()
         time.sleep(30)
