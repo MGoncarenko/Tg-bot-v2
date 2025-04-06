@@ -15,11 +15,11 @@ import schedule
 import pytz
 from flask import Flask
 
-# Імпортуємо дані з файлу конфігурації (цей файл містить API ключі і не повинен бути в репозиторії)
+# Якщо конфіг зберігається у файлі config.py, розкоментуйте:
 from config import TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL
 
 #####################
-# Налаштування Flask
+# Flask для пінгування (UptimeRobot)
 #####################
 app = Flask(__name__)
 
@@ -32,23 +32,25 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 #####################
-# Налаштування бота
-#####################
-
 # Підключення до Google Таблиці
+#####################
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url(GOOGLE_SHEET_URL)
-worksheet = sheet.sheet1  # За потреби змініть на sheet.worksheet("НазваВкладки")
+worksheet = sheet.sheet1  # Якщо потрібна інша вкладка, використайте sheet.worksheet("Назва")
 
+#####################
+# Налаштування бота
+#####################
 bot = telebot.TeleBot(TOKEN)
 
-# Файли для зберігання даних (user_roles та subscriptions)
 USER_ROLES_FILE = "user_roles.json"
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 
-# Функції роботи з файлами user_roles.json
+#####################
+# Функції для роботи з локальними файлами (ролі та підписки)
+#####################
 def load_user_roles():
     try:
         with open(USER_ROLES_FILE, "r", encoding="utf-8") as file:
@@ -60,7 +62,6 @@ def save_user_roles(user_roles):
     with open(USER_ROLES_FILE, "w", encoding="utf-8") as file:
         json.dump(user_roles, file, ensure_ascii=False, indent=4)
 
-# Функції роботи з файлами subscriptions.json
 def load_subscriptions():
     try:
         with open(SUBSCRIPTIONS_FILE, "r", encoding="utf-8") as f:
@@ -72,25 +73,27 @@ def save_subscriptions(subs):
     with open(SUBSCRIPTIONS_FILE, "w", encoding="utf-8") as f:
         json.dump(subs, f, ensure_ascii=False, indent=4)
 
-# Функція логування помилок (штрих-кодів)
+#####################
+# Логування помилок штрих-кодів
+#####################
 def log_barcode_error(user_nickname, error_message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open("barcode_error_log.txt", "a", encoding="utf-8") as f:
         f.write(f"{timestamp} - {user_nickname}: {error_message}\n")
 
 #####################
-# Обробка команд бота
+# Команди бота
 #####################
 
-# /start – відправляє привітальне повідомлення з інструкцією щодо підписки
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
     chat_id = str(message.chat.id)
     user_roles = load_user_roles()
-    subscribe_info = ("\n\nВи можете підписатися на щоденний звіт, "
-                      "ввівши команду /subscribe <час> (наприклад, /subscribe 22:00). "
-                      "Якщо час не вказано – за замовчуванням 22:00. "
-                      "Відписатися – командою /unsubscribe.")
+    subscribe_info = (
+        "\n\nВи можете підписатися на щоденний звіт, ввівши команду /subscribe <час> "
+        "(наприклад, /subscribe 22:00). Якщо час не вказано – за замовчуванням 22:00. "
+        "Відписатися – командою /unsubscribe."
+    )
     if chat_id in user_roles:
         role = user_roles[chat_id]["role"]
         bot.send_message(
@@ -112,7 +115,6 @@ def send_welcome(message):
             f"{subscribe_info}"
         )
 
-# Команди для вибору ролі
 @bot.message_handler(commands=["Office"])
 def set_office_role(message):
     chat_id = str(message.chat.id)
@@ -122,7 +124,11 @@ def set_office_role(message):
         "username": message.from_user.username
     }
     save_user_roles(user_roles)
-    bot.send_message(chat_id, "✅ Ви обрали роль: *Офіс*\n\nНадсилайте ТТН (код або фото), вони автоматично обробляться.", parse_mode="Markdown")
+    bot.send_message(
+        chat_id,
+        "✅ Ви обрали роль: *Офіс*\n\nНадсилайте ТТН (код або фото), вони автоматично обробляться.",
+        parse_mode="Markdown"
+    )
 
 @bot.message_handler(commands=["Cklad"])
 def set_cklad_role(message):
@@ -133,9 +139,12 @@ def set_cklad_role(message):
         "username": message.from_user.username
     }
     save_user_roles(user_roles)
-    bot.send_message(chat_id, "✅ Ви обрали роль: *Склад*\n\nНадсилайте ТТН (код або фото), вони автоматично обробляться.", parse_mode="Markdown")
+    bot.send_message(
+        chat_id,
+        "✅ Ви обрали роль: *Склад*\n\nНадсилайте ТТН (код або фото), вони автоматично обробляться.",
+        parse_mode="Markdown"
+    )
 
-# Команда підписки. Формат: /subscribe або /subscribe 22:00
 @bot.message_handler(commands=["subscribe"])
 def subscribe(message):
     chat_id = str(message.chat.id)
@@ -160,19 +169,20 @@ def subscribe(message):
     save_subscriptions(subs)
     bot.send_message(chat_id, f"Ви успішно підписалися на повідомлення о {sub_time}.")
 
-# Команда відписки
 @bot.message_handler(commands=["unsubscribe"])
 def unsubscribe(message):
     chat_id = str(message.chat.id)
     subs = load_subscriptions()
     if chat_id in subs:
-         del subs[chat_id]
-         save_subscriptions(subs)
-         bot.send_message(chat_id, "Ви успішно відписалися від повідомлень.")
+        del subs[chat_id]
+        save_subscriptions(subs)
+        bot.send_message(chat_id, "Ви успішно відписалися від повідомлень.")
     else:
-         bot.send_message(chat_id, "Ви не були підписані.")
+        bot.send_message(chat_id, "Ви не були підписані.")
 
-# Обробка фото – зчитуються всі штрих-коди
+#####################
+# Обробка фото (штрих-кодів)
+#####################
 @bot.message_handler(content_types=["photo"])
 def handle_barcode_image(message):
     chat_id = str(message.chat.id)
@@ -213,7 +223,9 @@ def handle_barcode_image(message):
         log_barcode_error(user_nickname, str(e))
         bot.send_message(chat_id, "❌ Помилка обробки зображення, спробуйте ще раз!")
 
-# Обробка текстових повідомлень (якщо повідомлення містить ТТН)
+#####################
+# Обробка текстових повідомлень (якщо це TTN)
+#####################
 @bot.message_handler(func=lambda message: True)
 def handle_text_message(message):
     if message.text.startswith("/"):
@@ -223,7 +235,9 @@ def handle_text_message(message):
     if digits and 8 <= len(digits) <= 18:
         handle_ttn_logic(chat_id, digits, message.from_user.username)
 
-# Основна логіка обробки ТТН залежно від ролі користувача
+#####################
+# Основна логіка роботи з TTN
+#####################
 def handle_ttn_logic(chat_id, ttn, username):
     user_roles = load_user_roles()
     if chat_id not in user_roles:
@@ -235,13 +249,13 @@ def handle_ttn_logic(chat_id, ttn, username):
     elif role == "Офіс":
         check_ttn_in_sheet(chat_id, ttn)
 
-# Функція додавання ТТН у блок для поточного дня (колонки A, B, C)
 def add_ttn_to_sheet(ttn, username, chat_id):
+    """Записуємо TTN в рядок (A, B, C). Перший ряд - заголовок, запис починаємо з другого."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        # Припускаємо, що A1 містить заголовок, а ТТН записуються з A2
-        col_a = worksheet.col_values(1)
-        next_row = len(col_a) + 1
+        col_a = worksheet.col_values(1)  # зчитуємо колонку A цілком
+        next_row = len(col_a) + 1        # індекс наступного вільного рядка
+        # Записуємо: A - TTN, B - час, C - нікнейм
         worksheet.update(f"A{next_row}:C{next_row}", [[ttn, now, username]])
         bot.send_message(chat_id, f"✅ ТТН `{ttn}` додано!", parse_mode="Markdown")
     except Exception as e:
@@ -249,115 +263,95 @@ def add_ttn_to_sheet(ttn, username, chat_id):
         user_nickname = username or str(chat_id)
         log_barcode_error(user_nickname, f"append_row error: {e}")
 
-# Функція перевірки ТТН по всіх блоках (TTН зберігаються в A, E, I, M, Q, U)
 def check_ttn_in_sheet(chat_id, ttn):
+    """Перевіряємо, чи є TTN у колонці A (з рядка 2 і далі). Якщо так – повертаємо дату (колонка B)."""
     try:
-        ttn_block1 = worksheet.col_values(1)[1:]   # блок 1 (A)
-        ttn_block2 = worksheet.col_values(5)[1:]   # блок 2 (E)
-        ttn_block3 = worksheet.col_values(9)[1:]   # блок 3 (I)
-        ttn_block4 = worksheet.col_values(13)[1:]  # блок 4 (M)
-        ttn_block5 = worksheet.col_values(17)[1:]  # блок 5 (Q)
-        ttn_block6 = worksheet.col_values(21)[1:]  # блок 6 (U)
-    except Exception as e:
-        bot.send_message(chat_id, "❌ Помилка зчитування таблиці для перевірки!")
-        return
-
-    all_ttns = ttn_block1 + ttn_block2 + ttn_block3 + ttn_block4 + ttn_block5 + ttn_block6
-    if ttn in all_ttns:
         records = worksheet.get_all_values()
-        found = False
+        # records[0] = ['TTN', 'Дата надсилання ТТН', 'Нікнейм в тт']
+        # починаємо з 2-го рядка (індекс 1)
+        if len(records) <= 1:
+            bot.send_message(chat_id, "❌ В базі немає ТТН.")
+            return
+
         for row in records[1:]:
-            if ttn in row:
-                idx = row.index(ttn)
-                date_time = row[idx + 1] if idx + 1 < len(row) else "невідомо"
-                bot.send_message(chat_id, f"✅ Замовлення зібрано! ТТН: `{ttn}`\n🕒 Час: {date_time}", parse_mode="Markdown")
-                found = True
-                break
-        if not found:
-            bot.send_message(chat_id, f"❌ ТТН `{ttn}` не знайдено у базі!", parse_mode="Markdown")
-    else:
+            # row = [TTN, Дата, Нікнейм]
+            if len(row) >= 1 and row[0] == ttn:
+                date_time = row[1] if len(row) > 1 else "невідомо"
+                bot.send_message(
+                    chat_id,
+                    f"✅ Замовлення зібрано! ТТН: `{ttn}`\n🕒 Час: {date_time}",
+                    parse_mode="Markdown"
+                )
+                return
         bot.send_message(chat_id, f"❌ ТТН `{ttn}` не знайдено у базі!", parse_mode="Markdown")
 
-# Функція зміщення блоків (6 блоків по 3 колонки)
-def shift_table():
+    except Exception as e:
+        bot.send_message(chat_id, "❌ Помилка зчитування таблиці для перевірки!")
+        print(e)
+
+#####################
+# Очищення таблиці опівночі (крім заголовків)
+#####################
+def clear_sheet():
     """
-    Зсуває дані в таблиці:
-      - Блок 6 (U-V-W) ← блок 5 (Q-R-S)
-      - Блок 5 (Q-R-S) ← блок 4 (M-N-O)
-      - Блок 4 (M-N-O) ← блок 3 (I-J-K)
-      - Блок 3 (I-J-K) ← блок 2 (E-F-G)
-      - Блок 2 (E-F-G) ← блок 1 (A-B-C)
-      - Блок 1 (A-B-C) очищається для нового дня
-    Також оновлюються заголовки в A1, E1, I1, M1, Q1, U1 із відповідними датами.
+    Видаляємо всі дані, крім першого рядка (заголовків).
     """
     try:
-        block1_data = worksheet.get_values("A2:C")
-        block2_data = worksheet.get_values("E2:G")
-        block3_data = worksheet.get_values("I2:K")
-        block4_data = worksheet.get_values("M2:O")
-        block5_data = worksheet.get_values("Q2:S")
-        worksheet.update("U2", block5_data)   # блок 5 → блок 6
-        worksheet.update("Q2", block4_data)   # блок 4 → блок 5
-        worksheet.update("M2", block3_data)   # блок 3 → блок 4
-        worksheet.update("I2", block2_data)   # блок 2 → блок 3
-        worksheet.update("E2", block1_data)   # блок 1 → блок 2
-        # Очищення блоку 1 для нового дня
-        row_count = len(block1_data)
-        if row_count > 0:
-            empty_data = [[""] * 3 for _ in range(row_count)]
-            worksheet.update("A2", empty_data)
-
-        # Оновлення заголовків із датами
-        tz_kiev = pytz.timezone("Europe/Kiev")
-        now_kiev = datetime.now(tz_kiev)
-        dates = [
-            now_kiev.date(),                           # блок 1 – поточний день
-            now_kiev.date() - timedelta(days=1),         # блок 2
-            now_kiev.date() - timedelta(days=2),         # блок 3
-            now_kiev.date() - timedelta(days=3),         # блок 4
-            now_kiev.date() - timedelta(days=4),         # блок 5
-            now_kiev.date() - timedelta(days=5)          # блок 6
-        ]
-        worksheet.update("A1", [[str(dates[0])]])
-        worksheet.update("E1", [[str(dates[1])]])
-        worksheet.update("I1", [[str(dates[2])]])
-        worksheet.update("M1", [[str(dates[3])]])
-        worksheet.update("Q1", [[str(dates[4])]])
-        worksheet.update("U1", [[str(dates[5])]])
+        records = worksheet.get_all_values()
+        row_count = len(records)  # кількість рядків
+        if row_count > 1:
+            # Очищаємо з 2-го рядка до останнього
+            empty_data = [[""] * 3 for _ in range(row_count - 1)]
+            worksheet.update(f"A2:C{row_count}", empty_data)
+            print("Sheet cleared successfully.")
     except Exception as e:
-        print(f"Помилка при зсуві таблиці: {e}")
+        print(f"Помилка при очищенні таблиці: {e}")
 
-def run_shift_table_with_tz():
+def run_clear_sheet_with_tz():
+    """Запускаємо clear_sheet() о 00:00 за Києвом."""
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
     if now_kiev.strftime("%H:%M") == "00:00":
-        shift_table()
+        clear_sheet()
 
-# Функція розсилки повідомлень підписникам (рахуємо ТТН за поточний день із блоку 1, починаючи з A3)
+#####################
+# Розсилка підписникам
+#####################
 def send_subscription_notifications():
+    """
+    Кожну хвилину перевіряємо, чи настав час надсилати звіт.
+    Рахуємо кількість TTN у колонці A (починаючи з рядка 2).
+    """
     tz_kiev = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz_kiev)
     current_time_str = now.strftime("%H:%M")
     today_str = now.strftime("%Y-%m-%d")
+
     subs = load_subscriptions()
     for chat_id, data in subs.items():
         sub_time = data.get("time", "22:00")
         last_sent = data.get("last_sent", "")
         if current_time_str == sub_time and last_sent != today_str:
             try:
-                # Читаємо дані з колонки A, починаючи з третього рядка (A3 і далі)
-                col_a = worksheet.col_values(1)[2:]
+                # Зчитуємо колонку A, пропускаємо заголовок
+                col_a = worksheet.col_values(1)[1:]  # з рядка 2
                 count_ttn = sum(1 for x in col_a if x.strip() != "")
             except Exception as e:
                 count_ttn = "Невідомо (помилка)"
             bot.send_message(chat_id, f"За сьогодні оброблено ТТН: {count_ttn}")
             subs[chat_id]["last_sent"] = today_str
+
     save_subscriptions(subs)
 
-# Планувальник: розсилка повідомлень кожну хвилину та зсув таблиці о 00:00
+#####################
+# Планувальник (schedule)
+#####################
 def run_scheduler():
+    # Щохвилини перевіряємо, чи настав час відправляти звіти
     schedule.every().minute.do(send_subscription_notifications)
-    schedule.every().day.at("00:00").do(run_shift_table_with_tz)
+    # О 00:00 за Києвом очищаємо таблицю
+    schedule.every().day.at("00:00").do(run_clear_sheet_with_tz)
+
     while True:
         schedule.run_pending()
         time.sleep(30)
@@ -366,15 +360,15 @@ def run_scheduler():
 # Головна функція
 #####################
 def main():
-    # Запуск Flask-сервера для пінгування (для UptimeRobot)
+    # 1) Запускаємо Flask-сервер у фоновому потоці (для пінгування UptimeRobot)
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Запуск бота у фоновому потоці
+    # 2) Запускаємо Telegram-бот у фоновому потоці
     bot_thread = threading.Thread(target=bot.polling, daemon=True)
     bot_thread.start()
 
-    # Запуск планувальника у головному потоці з обробкою KeyboardInterrupt
+    # 3) Запускаємо планувальник у головному потоці (з обробкою KeyboardInterrupt)
     try:
         run_scheduler()
     except KeyboardInterrupt:
