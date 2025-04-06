@@ -15,7 +15,6 @@ import pytz
 from flask import Flask
 
 # ======= Імпорт конфігурації (ключі та URL таблиць) =======
-# Файл config.py НЕ повинен потрапляти в GitHub, тому він додається окремо
 from config import (
     TOKEN,
     GOOGLE_SHEETS_CREDENTIALS,  # шлях до JSON з ключами для Google API
@@ -41,7 +40,7 @@ client = gspread.authorize(creds)
 
 # Таблиця для TTN (дані про посилки)
 sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
-worksheet_ttn = sheet_ttn.sheet1  # Має заголовки в першому рядку (наприклад, "TTN", "Дата", "Нікнейм")
+worksheet_ttn = sheet_ttn.sheet1  # Має заголовки в першому рядку
 
 # Таблиця для користувачів
 sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
@@ -50,16 +49,9 @@ worksheet_users = sheet_users.sheet1  # Заголовки: Tg ID, Роль, Tg 
 # ======= Ініціалізація Telegram-бота =======
 bot = telebot.TeleBot(TOKEN)
 
-# ======= Функції роботи з даними користувачів (з Google Таблиці) =======
+# ======= Функції роботи з даними користувачів (Google Таблиця) =======
 
 def get_all_users_data():
-    """
-    Зчитує всі дані з worksheet_users та повертає словник:
-    {
-       "tg_id": {"role": ..., "username": ..., "time": ..., "last_sent": ...},
-       ...
-    }
-    """
     data = {}
     rows = worksheet_users.get_all_values()  # Перший рядок – заголовки
     for row in rows[1:]:
@@ -74,10 +66,6 @@ def get_all_users_data():
     return data
 
 def find_user_row(tg_id):
-    """
-    Шукає рядок, де в колонці A є tg_id.
-    Повертає індекс рядка (1-based) або None.
-    """
     rows = worksheet_users.get_all_values()
     for i, row in enumerate(rows, start=1):
         if row and row[0] == tg_id:
@@ -85,10 +73,6 @@ def find_user_row(tg_id):
     return None
 
 def update_user_data(tg_id, role, username, report_time, last_sent=""):
-    """
-    Оновлює або додає дані користувача в worksheet_users.
-    Колонки: A: Tg ID, B: Роль, C: Tg нік, D: Час для звіту, E: Останній звіт.
-    """
     row_index = find_user_row(tg_id)
     if row_index is None:
         next_row = len(worksheet_users.get_all_values()) + 1
@@ -97,10 +81,6 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
         worksheet_users.update(f"A{row_index}:E{row_index}", [[tg_id, role, username, report_time, last_sent]])
 
 def get_user_data(tg_id):
-    """
-    Повертає дані користувача: (role, username, report_time, last_sent)
-    Якщо користувача немає – повертає (None, "", "", "")
-    """
     row_index = find_user_row(tg_id)
     if row_index is None:
         return None, "", "", ""
@@ -114,10 +94,9 @@ def get_user_data(tg_id):
 # ======= Функції роботи з таблицею TTN =======
 
 def add_ttn_to_sheet(ttn, username, chat_id):
-    """Записує TTN, дату та username в worksheet_ttn (колонки A, B, C)."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        col_a = worksheet_ttn.col_values(1)  # Читаємо всю колонку A
+        col_a = worksheet_ttn.col_values(1)
         next_row = len(col_a) + 1
         worksheet_ttn.update(f"A{next_row}:C{next_row}", [[ttn, now, username]])
         bot.send_message(chat_id, f"✅ ТТН `{ttn}` додано!", parse_mode="Markdown")
@@ -126,7 +105,6 @@ def add_ttn_to_sheet(ttn, username, chat_id):
         print(e)
 
 def check_ttn_in_sheet(chat_id, ttn):
-    """Перевіряє, чи є TTN у worksheet_ttn (колонка A). Якщо так, повертає дату (колонка B)."""
     try:
         records = worksheet_ttn.get_all_values()
         if len(records) <= 1:
@@ -143,9 +121,6 @@ def check_ttn_in_sheet(chat_id, ttn):
         print(e)
 
 def clear_ttn_sheet():
-    """
-    Очищає worksheet_ttn, залишаючи лише заголовки (рядок 1).
-    """
     try:
         records = worksheet_ttn.get_all_values()
         row_count = len(records)
@@ -155,6 +130,13 @@ def clear_ttn_sheet():
             print("TTN sheet cleared successfully.")
     except Exception as e:
         print("Помилка при очищенні таблиці TTN:", e)
+
+# Функція, що перевіряє час за київським часовим поясом та очищує TTN, якщо настав 00:00
+def run_clear_ttn_sheet_with_tz():
+    tz_kiev = pytz.timezone("Europe/Kiev")
+    now_kiev = datetime.now(tz_kiev)
+    if now_kiev.strftime("%H:%M") == "00:00":
+        clear_ttn_sheet()
 
 # ======= Команди Telegram-бота =======
 
@@ -235,7 +217,6 @@ def cmd_unsubscribe(message):
     if not role:
         bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
         return
-    # Очищуємо поле з часом звіту (D) - відписка
     update_user_data(chat_id, role, username, "", last_sent)
     bot.send_message(chat_id, "Ви успішно відписалися від повідомлень.")
 
@@ -246,12 +227,10 @@ def handle_barcode_image(message):
     if not role:
         bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
         return
-
     file_info = bot.get_file(message.photo[-1].file_id)
     downloaded_file = bot.download_file(file_info.file_path)
     np_arr = np.frombuffer(downloaded_file, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
     try:
         barcodes = decode(img)
         if not barcodes:
@@ -299,31 +278,24 @@ def handle_ttn_logic(chat_id, ttn, username):
 # ======= Розсилка звітів підписникам =======
 
 def send_subscription_notifications():
-    """
-    Кожну хвилину перевіряємо, чи настав час надсилати звіт.
-    Для кожного користувача з вказаним часом (колонка D) якщо поточний час співпадає
-    і значення в колонці E (останній звіт) не дорівнює сьогоднішній даті, надсилаємо звіт.
-    """
     tz = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz)
     current_time_str = now.strftime("%H:%M")
     today_str = now.strftime("%Y-%m-%d")
-
     all_users = get_all_users_data()
     for chat_id, info in all_users.items():
         report_time = info.get("time", "")
         if not report_time:
-            continue  # користувач не підписаний
+            continue
         if current_time_str == report_time:
             last_sent = info.get("last_sent", "")
             if last_sent != today_str:
                 try:
-                    col_a = worksheet_ttn.col_values(1)[1:]  # дані TTN, починаючи з другого рядка
+                    col_a = worksheet_ttn.col_values(1)[1:]
                     count_ttn = sum(1 for x in col_a if x.strip() != "")
                 except Exception:
                     count_ttn = "Невідомо (помилка)"
                 bot.send_message(chat_id, f"За сьогодні оброблено ТТН: {count_ttn}")
-                # Оновлюємо в таблиці користувачів останню дату розсилки (колонка E)
                 role, username, report_time, _ = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, report_time, today_str)
 
@@ -331,7 +303,7 @@ def send_subscription_notifications():
 
 def run_scheduler():
     schedule.every().minute.do(send_subscription_notifications)
-    schedule.every().day.at("13:05").do(clear_ttn_sheet)
+    schedule.every().minute.do(run_clear_ttn_sheet_with_tz)
     while True:
         schedule.run_pending()
         time.sleep(30)
@@ -341,10 +313,8 @@ def run_scheduler():
 def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-
     bot_thread = threading.Thread(target=bot.polling, daemon=True)
     bot_thread.start()
-
     try:
         run_scheduler()
     except KeyboardInterrupt:
