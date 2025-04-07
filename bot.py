@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import threading
 import time
 from datetime import datetime, timedelta
@@ -14,12 +15,15 @@ import schedule
 import pytz
 from flask import Flask
 
-# ======= Імпорт конфігурації (ключі та URL таблиць) =======
+# ======= Імпорт конфігурації =======
+# Файл config.py має містити:
+# TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL (для TTN),
+# GOOGLE_SHEET_URL_USERS (для користувачів)
 from config import (
     TOKEN,
-    GOOGLE_SHEETS_CREDENTIALS,  # шлях до JSON з ключами для Google API
-    GOOGLE_SHEET_URL,           # URL таблиці для TTN
-    GOOGLE_SHEET_URL_USERS      # URL таблиці для користувачів
+    GOOGLE_SHEETS_CREDENTIALS,
+    GOOGLE_SHEET_URL,
+    GOOGLE_SHEET_URL_USERS,
 )
 
 # ======= Flask-сервер для пінгування (UptimeRobot) =======
@@ -35,64 +39,123 @@ def run_flask():
 
 # ======= Підключення до Google Таблиць =======
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
-client = gspread.authorize(creds)
 
-# Таблиця для TTN (дані про посилки)
-sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
-worksheet_ttn = sheet_ttn.sheet1  # Має заголовки в першому рядку
+def initialize_google_sheets():
+    global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
+        client = gspread.authorize(creds)
+        sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
+        worksheet_ttn = sheet_ttn.sheet1
+        sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
+        worksheet_users = sheet_users.sheet1
+        print("Google Sheets initialized successfully.")
+    except Exception as e:
+        notify_admins(f"Error initializing Google Sheets: {e}")
+        print("Error initializing Google Sheets:", e)
 
-# Таблиця для користувачів
-sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
-worksheet_users = sheet_users.sheet1  # Заголовки: Tg ID, Роль, Tg нік, Час для звіту, Останній звіт
+initialize_google_sheets()
 
-# ======= Ініціалізація Telegram-бота =======
-bot = telebot.TeleBot(TOKEN)
-
-# ======= Функції роботи з даними користувачів (Google Таблиця) =======
-
+# ======= Функції для роботи з даними користувачів (Google Таблиця) =======
+# Таблиця користувачів має стовпці:
+# A: Tg ID, B: Роль, C: Tg нік, D: Час для звіту, E: Останній звіт, F: Admin (якщо містить "Admin", то користувач є адміністратором)
 def get_all_users_data():
     data = {}
-    rows = worksheet_users.get_all_values()  # Перший рядок – заголовки
-    for row in rows[1:]:
-        if len(row) < 4:
-            continue
-        tg_id = row[0]
-        role = row[1]
-        username = row[2]
-        report_time = row[3]
-        last_sent = row[4] if len(row) >= 5 else ""
-        data[tg_id] = {"role": role, "username": username, "time": report_time, "last_sent": last_sent}
+    try:
+        rows = worksheet_users.get_all_values()  # Перший рядок – заголовки
+        for row in rows[1:]:
+            if len(row) < 6:
+                continue
+            tg_id = row[0]
+            role = row[1]
+            username = row[2]
+            report_time = row[3]
+            last_sent = row[4] if len(row) >= 5 else ""
+            admin_flag = row[5].strip().lower() == "admin" if len(row) >= 6 else False
+            data[tg_id] = {"role": role, "username": username, "time": report_time, "last_sent": last_sent, "admin": admin_flag}
+    except Exception as e:
+        notify_admins(f"Error reading users data: {e}")
+        print("Error reading users data:", e)
     return data
 
 def find_user_row(tg_id):
-    rows = worksheet_users.get_all_values()
-    for i, row in enumerate(rows, start=1):
-        if row and row[0] == tg_id:
-            return i
+    try:
+        rows = worksheet_users.get_all_values()
+        for i, row in enumerate(rows, start=1):
+            if row and row[0] == tg_id:
+                return i
+    except Exception as e:
+        notify_admins(f"Error in find_user_row for {tg_id}: {e}")
+        print("Error in find_user_row:", e)
     return None
 
 def update_user_data(tg_id, role, username, report_time, last_sent=""):
-    row_index = find_user_row(tg_id)
-    if row_index is None:
-        next_row = len(worksheet_users.get_all_values()) + 1
-        worksheet_users.update(f"A{next_row}:E{next_row}", [[tg_id, role, username, report_time, last_sent]])
-    else:
-        worksheet_users.update(f"A{row_index}:E{row_index}", [[tg_id, role, username, report_time, last_sent]])
+    try:
+        row_index = find_user_row(tg_id)
+        if row_index is None:
+            next_row = len(worksheet_users.get_all_values()) + 1
+            worksheet_users.update(f"A{next_row}:F{next_row}", [[tg_id, role, username, report_time, last_sent, ""]])
+        else:
+            current_row = worksheet_users.row_values(row_index)
+            admin_value = current_row[5] if len(current_row) >= 6 else ""
+            worksheet_users.update(f"A{row_index}:F{row_index}", [[tg_id, role, username, report_time, last_sent, admin_value]])
+    except Exception as e:
+        notify_admins(f"Error updating user data for {tg_id}: {e}")
+        print("Error updating user data:", e)
 
 def get_user_data(tg_id):
     row_index = find_user_row(tg_id)
     if row_index is None:
-        return None, "", "", ""
-    row = worksheet_users.row_values(row_index)
-    role = row[1] if len(row) > 1 else None
-    username = row[2] if len(row) > 2 else ""
-    report_time = row[3] if len(row) > 3 else ""
-    last_sent = row[4] if len(row) > 4 else ""
-    return role, username, report_time, last_sent
+        return None, "", "", "", False
+    try:
+        row = worksheet_users.row_values(row_index)
+        role = row[1] if len(row) > 1 else None
+        username = row[2] if len(row) > 2 else ""
+        report_time = row[3] if len(row) > 3 else ""
+        last_sent = row[4] if len(row) > 4 else ""
+        admin_flag = row[5].strip().lower() == "admin" if len(row) > 5 else False
+        return role, username, report_time, last_sent, admin_flag
+    except Exception as e:
+        notify_admins(f"Error getting user data for {tg_id}: {e}")
+        print("Error getting user data:", e)
+        return None, "", "", "", False
+
+# Функції для зберігання ID адміністраторів у файл admins.json
+def update_admin_file():
+    try:
+        rows = worksheet_users.get_all_values()
+        admin_ids = []
+        for row in rows[1:]:
+            if len(row) >= 6 and row[5].strip().lower() == "admin":
+                admin_ids.append(row[0])
+        with open("admins.json", "w", encoding="utf-8") as f:
+            json.dump(admin_ids, f)
+        return admin_ids
+    except Exception as e:
+        print("Error updating admin file:", e)
+        try:
+            with open("admins.json", "r", encoding="utf-8") as f:
+                admin_ids = json.load(f)
+            return admin_ids
+        except Exception as ex:
+            return []
+
+def get_admin_ids():
+    return update_admin_file()
+
+def notify_admins(error_msg):
+    admin_ids = get_admin_ids()
+    if not admin_ids:
+        print("No admin IDs available to notify.")
+        return
+    for admin_id in admin_ids:
+        try:
+            bot.send_message(admin_id, f"[ALERT] {error_msg}")
+        except Exception as e:
+            print(f"Failed to notify admin {admin_id}: {e}")
 
 # ======= Функції роботи з таблицею TTN =======
-
+# Таблиця TTN має заголовки в першому рядку: A: TTN, B: Дата, C: Нікнейм
 def add_ttn_to_sheet(ttn, username, chat_id):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -102,6 +165,7 @@ def add_ttn_to_sheet(ttn, username, chat_id):
         bot.send_message(chat_id, f"✅ ТТН `{ttn}` додано!", parse_mode="Markdown")
     except Exception as e:
         bot.send_message(chat_id, "❌ Помилка запису ТТН до таблиці!")
+        notify_admins(f"Error in add_ttn_to_sheet for chat_id {chat_id}: {e}")
         print(e)
 
 def check_ttn_in_sheet(chat_id, ttn):
@@ -118,6 +182,7 @@ def check_ttn_in_sheet(chat_id, ttn):
         bot.send_message(chat_id, f"❌ ТТН `{ttn}` не знайдено у базі!", parse_mode="Markdown")
     except Exception as e:
         bot.send_message(chat_id, "❌ Помилка зчитування таблиці для перевірки!")
+        notify_admins(f"Error in check_ttn_in_sheet for chat_id {chat_id}: {e}")
         print(e)
 
 def clear_ttn_sheet():
@@ -129,21 +194,29 @@ def clear_ttn_sheet():
             worksheet_ttn.update(f"A2:C{row_count}", empty_data)
             print("TTN sheet cleared successfully.")
     except Exception as e:
+        notify_admins(f"Error clearing TTN sheet: {e}")
         print("Помилка при очищенні таблиці TTN:", e)
 
-# Функція, що перевіряє час за київським часовим поясом та очищує TTN, якщо настав 00:00
 def run_clear_ttn_sheet_with_tz():
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
     if now_kiev.strftime("%H:%M") == "00:00":
         clear_ttn_sheet()
 
-# ======= Команди Telegram-бота =======
+# ======= Функції для періодичної реініціалізації Google Sheets =======
+def reinitialize_google_sheets():
+    try:
+        initialize_google_sheets()
+        print("Google Sheets reinitialized successfully.")
+    except Exception as e:
+        notify_admins(f"Error reinitializing Google Sheets: {e}")
+        print("Error reinitializing Google Sheets:", e)
 
+# ======= Telegram-бот: основні хендлери =======
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
-    role, username, report_time, last_sent = get_user_data(chat_id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     subscribe_info = (
         "\n\nВи можете підписатися на щоденний звіт, ввівши команду /subscribe <час> "
         "(наприклад, /subscribe 22:00). Якщо час не вказано – за замовчуванням 22:00. "
@@ -172,7 +245,7 @@ def cmd_start(message):
 @bot.message_handler(commands=["Office"])
 def cmd_office(message):
     chat_id = str(message.chat.id)
-    role, username, report_time, last_sent = get_user_data(chat_id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if not username:
         username = message.from_user.username or ""
     update_user_data(chat_id, "Офіс", username, report_time, last_sent)
@@ -181,7 +254,7 @@ def cmd_office(message):
 @bot.message_handler(commands=["Cklad"])
 def cmd_cklad(message):
     chat_id = str(message.chat.id)
-    role, username, report_time, last_sent = get_user_data(chat_id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if not username:
         username = message.from_user.username or ""
     update_user_data(chat_id, "Склад", username, report_time, last_sent)
@@ -202,7 +275,7 @@ def cmd_subscribe(message):
         else:
             bot.send_message(chat_id, "Невірний формат часу. Використовуйте формат HH:MM, наприклад, 22:00.")
             return
-    role, username, _, last_sent = get_user_data(chat_id)
+    role, username, _, last_sent, admin_flag = get_user_data(chat_id)
     if not role:
         role = "Офіс"
         if not username:
@@ -213,7 +286,7 @@ def cmd_subscribe(message):
 @bot.message_handler(commands=["unsubscribe"])
 def cmd_unsubscribe(message):
     chat_id = str(message.chat.id)
-    role, username, report_time, last_sent = get_user_data(chat_id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if not role:
         bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
         return
@@ -223,7 +296,7 @@ def cmd_unsubscribe(message):
 @bot.message_handler(content_types=["photo"])
 def handle_barcode_image(message):
     chat_id = str(message.chat.id)
-    role, username, report_time, last_sent = get_user_data(chat_id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if not role:
         bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
         return
@@ -251,6 +324,7 @@ def handle_barcode_image(message):
         bot.send_message(chat_id, f"Оброблено штрих-кодів: успішно: {success_count}, з помилками: {error_count}")
     except Exception as e:
         bot.send_message(chat_id, "❌ Помилка обробки зображення, спробуйте ще раз!")
+        notify_admins(f"Error in handle_barcode_image for chat {chat_id}: {e}")
         print(e)
 
 @bot.message_handler(func=lambda m: True)
@@ -260,14 +334,14 @@ def handle_text_message(message):
     chat_id = str(message.chat.id)
     digits = re.sub(r"\D", "", message.text)
     if digits and 8 <= len(digits) <= 18:
-        role, username, report_time, last_sent = get_user_data(chat_id)
+        role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
         if not role:
             bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
             return
         handle_ttn_logic(chat_id, digits, username)
 
 def handle_ttn_logic(chat_id, ttn, username):
-    role, usern, report_time, last_sent = get_user_data(chat_id)
+    role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if role == "Склад":
         add_ttn_to_sheet(ttn, username, chat_id)
     elif role == "Офіс":
@@ -276,7 +350,6 @@ def handle_ttn_logic(chat_id, ttn, username):
         bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
 
 # ======= Розсилка звітів підписникам =======
-
 def send_subscription_notifications():
     tz = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz)
@@ -293,28 +366,59 @@ def send_subscription_notifications():
                 try:
                     col_a = worksheet_ttn.col_values(1)[1:]
                     count_ttn = sum(1 for x in col_a if x.strip() != "")
-                except Exception:
+                except Exception as e:
                     count_ttn = "Невідомо (помилка)"
+                    notify_admins(f"Error counting TTN for report for chat {chat_id}: {e}")
                 bot.send_message(chat_id, f"За сьогодні оброблено ТТН: {count_ttn}")
-                role, username, report_time, _ = get_user_data(chat_id)
+                role, username, report_time, _ , admin_flag = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, report_time, today_str)
 
-# ======= Планувальник (schedule) =======
+# ======= Функція періодичної реініціалізації Google Sheets і Telegram-з’єднання =======
+def reinitialize_google_sheets():
+    try:
+        initialize_google_sheets()
+        print("Google Sheets reinitialized successfully.")
+    except Exception as e:
+        notify_admins(f"Error reinitializing Google Sheets: {e}")
+        print("Error reinitializing Google Sheets:", e)
 
+# ======= Функція Telegram-полінгу з автоматичним відновленням з’єднання =======
+def run_bot_polling():
+    while True:
+        try:
+            # Використовуємо infinity_polling із skip_pending=False, щоб обробити всі накопичені оновлення
+            bot.infinity_polling(skip_pending=False, timeout=30)
+        except Exception as e:
+            notify_admins(f"Telegram polling error: {e}")
+            print(f"Telegram polling error: {e}")
+            time.sleep(5)
+
+# ======= Планувальник (schedule) =======
 def run_scheduler():
     schedule.every().minute.do(send_subscription_notifications)
     schedule.every().minute.do(run_clear_ttn_sheet_with_tz)
+    schedule.every().hour.do(reinitialize_google_sheets)
     while True:
         schedule.run_pending()
         time.sleep(30)
 
-# ======= Основна функція: запуск Flask, бота та планувальника =======
-
+# ======= Основна функція: запуск Flask, Telegram-полінгу та планувальника =======
 def main():
+    # Завантаження ID адміністраторів при старті
+    admin_ids = get_admin_ids()
+    if admin_ids:
+        print("Loaded admin IDs:", admin_ids)
+    else:
+        print("No admin IDs found.")
+
+    # Запуск Flask-сервера для пінгування
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    bot_thread = threading.Thread(target=bot.polling, daemon=True)
+
+    # Запуск Telegram-полінгу в окремому потоці з автоматичним відновленням
+    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
+
     try:
         run_scheduler()
     except KeyboardInterrupt:
