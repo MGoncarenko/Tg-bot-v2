@@ -16,7 +16,7 @@ import pytz
 from flask import Flask
 
 # ======= Імпорт конфігурації =======
-# Файл config.py має містити:
+# config.py повинен містити:
 # TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL (для TTN),
 # GOOGLE_SHEET_URL_USERS (для користувачів)
 from config import (
@@ -59,9 +59,9 @@ def initialize_google_sheets():
 
 initialize_google_sheets()
 
-# ======= Функції для роботи з даними користувачів (Google Таблиця) =======
+# ======= Функції для роботи з даними користувачів =======
 # Таблиця користувачів має стовпці:
-# A: Tg ID, B: Роль, C: Tg нік, D: Час для звіту, E: Останній звіт, F: Admin (якщо містить "Admin", то користувач є адміністратором)
+# A: Tg ID, B: Роль, C: Tg нік, D: Час для звіту, E: Останній звіт, F: Admin (якщо Admin, то в цьому стовпці має бути "Admin")
 def get_all_users_data():
     data = {}
     try:
@@ -99,6 +99,7 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
             next_row = len(worksheet_users.get_all_values()) + 1
             worksheet_users.update(f"A{next_row}:F{next_row}", [[tg_id, role, username, report_time, last_sent, ""]])
         else:
+            # Не змінюємо колонку F (Admin) тут – залишаємо як є
             current_row = worksheet_users.row_values(row_index)
             admin_value = current_row[5] if len(current_row) >= 6 else ""
             worksheet_users.update(f"A{row_index}:F{row_index}", [[tg_id, role, username, report_time, last_sent, admin_value]])
@@ -123,7 +124,7 @@ def get_user_data(tg_id):
         print("Error getting user data:", e)
         return None, "", "", "", False
 
-# Функції для зберігання ID адміністраторів у файл admins.json
+# Функції для зберігання ID адміністраторів у локальний файл (admins.json)
 def update_admin_file():
     try:
         rows = worksheet_users.get_all_values()
@@ -200,22 +201,15 @@ def clear_ttn_sheet():
         notify_admins(f"Error clearing TTN sheet: {e}")
         print("Помилка при очищенні таблиці TTN:", e)
 
+# Функція, що перевіряє час за київським часовим поясом і запускає очищення TTN, якщо настав 00:00
 def run_clear_ttn_sheet_with_tz():
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
     if now_kiev.strftime("%H:%M") == "00:00":
         clear_ttn_sheet()
 
-# ======= Функції для періодичної реініціалізації Google Sheets =======
-def reinitialize_google_sheets():
-    try:
-        initialize_google_sheets()
-        print("Google Sheets reinitialized successfully.")
-    except Exception as e:
-        notify_admins(f"Error reinitializing Google Sheets: {e}")
-        print("Error reinitializing Google Sheets:", e)
+# ======= Telegram-команди =======
 
-# ======= Telegram-бот: основні хендлери =======
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
@@ -376,25 +370,20 @@ def send_subscription_notifications():
                 role, username, report_time, _ , admin_flag = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, report_time, today_str)
 
-# ======= Функція періодичної реініціалізації Google Sheets і Telegram-з’єднання =======
+# ======= Функція періодичної реініціалізації Google Sheets =======
 def reinitialize_google_sheets():
+    global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
-        initialize_google_sheets()
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
+        client = gspread.authorize(creds)
+        sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
+        worksheet_ttn = sheet_ttn.sheet1
+        sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
+        worksheet_users = sheet_users.sheet1
         print("Google Sheets reinitialized successfully.")
     except Exception as e:
         notify_admins(f"Error reinitializing Google Sheets: {e}")
         print("Error reinitializing Google Sheets:", e)
-
-# ======= Функція Telegram-полінгу з автоматичним відновленням з’єднання =======
-def run_bot_polling():
-    while True:
-        try:
-            # Використовуємо infinity_polling із skip_pending=False, щоб обробити всі накопичені оновлення
-            bot.infinity_polling(skip_pending=False, timeout=30)
-        except Exception as e:
-            notify_admins(f"Telegram polling error: {e}")
-            print(f"Telegram polling error: {e}")
-            time.sleep(5)
 
 # ======= Планувальник (schedule) =======
 def run_scheduler():
@@ -405,7 +394,7 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(30)
 
-# ======= Основна функція: запуск Flask, Telegram-полінгу та планувальника =======
+# ======= Основна функція: запуск Flask, бота та планувальника =======
 def main():
     # Завантаження ID адміністраторів при старті
     admin_ids = get_admin_ids()
@@ -414,12 +403,10 @@ def main():
     else:
         print("No admin IDs found.")
 
-    # Запуск Flask-сервера для пінгування
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Запуск Telegram-полінгу в окремому потоці з автоматичним відновленням
-    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+    bot_thread = threading.Thread(target=bot.polling, daemon=True)
     bot_thread.start()
 
     try:
