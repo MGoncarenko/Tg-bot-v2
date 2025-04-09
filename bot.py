@@ -345,7 +345,7 @@ def handle_barcode_image(message):
             try:
                 ttn_raw = barcode.data.decode("utf-8")
                 digits = re.sub(r"\D", "", ttn_raw)
-                if not digits or not (8 <= len(digits) <= 18):
+                if not digits or not (10 <= len(digits) <= 18):
                     continue
                 handle_ttn_logic(chat_id, digits, username)
                 success_count += 1
