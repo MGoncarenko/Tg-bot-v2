@@ -14,10 +14,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
+from gspread_formatting import clear_formatting  # Для скидання форматування
 
 # ======= Імпорт конфігурації =======
-# Файл config.py має містити:
-# TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL (для TTН), GOOGLE_SHEET_URL_USERS (для користувачів)
+# Файл config.py містить:
+# TOKEN, GOOGLE_SHEETS_CREDENTIALS (шлях до JSON ключів), 
+# GOOGLE_SHEET_URL (для TTН) та GOOGLE_SHEET_URL_USERS (для даних користувачів)
 from config import (
     TOKEN,
     GOOGLE_SHEETS_CREDENTIALS,
@@ -26,7 +28,6 @@ from config import (
 )
 
 # ======= Створення об’єкта бота =======
-# Переконуємося, що ця стрічка знаходиться до всіх звернень до bot
 bot = telebot.TeleBot(TOKEN)
 
 # ======= Flask-сервер для пінгування (UptimeRobot) =======
@@ -59,7 +60,7 @@ def initialize_google_sheets():
 
 initialize_google_sheets()
 
-# ======= Кешування даних користувачів =======
+# ======= Кешування даних користувачів (з таблиці Users) =======
 GLOBAL_USERS = {}
 
 def get_all_users_data():
@@ -120,89 +121,115 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
         print("Error updating user data:", e)
         notify_admins(f"Error updating user data for {tg_id}: {e}")
 
-# ======= Функції роботи з таблицею TTН =======
-# Таблиця TTН має заголовки: A: TTН, B: Дата, C: Нікнейм
-def add_ttn_to_sheet(ttn, username, chat_id):
+# ======= Локальні файли для обробки ТТН для складу =======
+PENDING_TTN_FILE = "pending_ttn.json"
+TTN_TABLE_CACHE_FILE = "ttn_table_cache.json"
+
+def load_pending_ttn():
+    try:
+        with open(PENDING_TTN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}  # структура: { chat_id: [ {"ttn": ..., "time": ..., "username": ...}, ... ] }
+
+def save_pending_ttn(pending):
+    try:
+        with open(PENDING_TTN_FILE, "w", encoding="utf-8") as f:
+            json.dump(pending, f)
+    except Exception as e:
+        print("Error saving pending TTNs:", e)
+        notify_admins(f"Error saving pending TTNs: {e}")
+
+# ======= Функції для обробки накопичених ТТН для складу =======
+def add_pending_ttn(chat_id, ttn, username):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pending = load_pending_ttn()
+    if chat_id not in pending:
+        pending[chat_id] = []
+    pending[chat_id].append({"ttn": ttn, "time": now, "username": username})
+    save_pending_ttn(pending)
+
+def bulk_upload_pending_ttn(chat_id, records):
     try:
-        col_a = worksheet_ttn.col_values(1)
-        next_row = len(col_a) + 1
-        worksheet_ttn.update(f"A{next_row}:C{next_row}", [[ttn, now, username]])
-        bot.send_message(chat_id, f"✅ ТТН `{ttn}` додано!", parse_mode="Markdown")
+        rows = [[rec["ttn"], rec["time"], rec["username"]] for rec in records]
+        worksheet_ttn.append_rows(rows, value_input_option="USER_ENTERED")
+        return True
     except Exception as e:
-        bot.send_message(chat_id, "❌ Помилка запису ТТН до таблиці!")
-        print(e)
-        notify_admins(f"Error in add_ttn_to_sheet for chat_id {chat_id}: {e}")
+        print("Error in bulk upload:", e)
+        notify_admins(f"Bulk upload error for chat {chat_id}: {e}")
+        return False
 
-def check_ttn_in_sheet(chat_id, ttn):
+def fetch_ttn_table():
     try:
-        records = worksheet_ttn.get_all_values()
-        if len(records) <= 1:
-            bot.send_message(chat_id, "❌ В базі немає ТТН.")
-            return
-        for row in records[1:]:
-            if row and len(row) >= 1 and row[0] == ttn:
-                date_time = row[1] if len(row) > 1 else "невідомо"
-                bot.send_message(chat_id, f"✅ Замовлення зібрано! ТТН: `{ttn}`\n🕒 Час: {date_time}", parse_mode="Markdown")
-                return
-        bot.send_message(chat_id, f"❌ ТТН `{ttn}` не знайдено у базі!", parse_mode="Markdown")
+        data = worksheet_ttn.get_all_values()
+        with open(TTN_TABLE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return data
     except Exception as e:
-        bot.send_message(chat_id, "❌ Помилка зчитування таблиці для перевірки!")
-        print(e)
-        notify_admins(f"Error in check_ttn_in_sheet for chat_id {chat_id}: {e}")
+        print("Error fetching TTN table:", e)
+        notify_admins(f"Error fetching TTN table: {e}")
+        return None
 
-def clear_ttn_sheet():
+def process_pending_ttn(chat_id):
+    pending = load_pending_ttn()
+    if chat_id not in pending or not pending[chat_id]:
+        return
+    # Отримуємо всі ТТН для даного чату
+    ttn_list = [rec["ttn"] for rec in pending[chat_id]]
+    message_text = "Обробляються наступні ТТН:\n" + "\n".join(f"- {x}" for x in ttn_list)
+    bot.send_message(chat_id, message_text)
+    # Bulk upload
+    if not bulk_upload_pending_ttn(chat_id, pending[chat_id]):
+        bot.send_message(chat_id, "❌ Помилка завантаження ТТН до таблиці. Дані передано адміну.")
+        notify_admins(f"Bulk upload failed for chat {chat_id}. Pending TTNs: {pending[chat_id]}")
+        return
+    # Після завантаження спробувати завантажити таблицю TTН
+    table_data = fetch_ttn_table()
+    if table_data is None:
+        bot.send_message(chat_id, "❌ Таблиця недоступна. ТТН передано адміну для перевірки.")
+        notify_admins(f"Failed to fetch TTN table for verification. Pending: {pending[chat_id]}")
+        return
+    # Перевірка: всі з pending мають бути в таблиці
+    table_ttns = [row[0] for row in table_data[1:]]  # пропускаємо заголовок
+    missing = [rec["ttn"] for rec in pending[chat_id] if rec["ttn"] not in table_ttns]
+    if missing:
+        bot.send_message(chat_id, f"❌ Деякі ТТН не додано до таблиці: {', '.join(missing)}")
+        notify_admins(f"Verification failed for chat {chat_id}. Missing: {missing}. Pending: {pending[chat_id]}")
+    else:
+        bot.send_message(chat_id, "✅ Усі ТТН успішно додано до таблиці.")
+    # Очистка pending для цього чату
+    pending[chat_id] = []
+    save_pending_ttn(pending)
+
+GLOBAL_PENDING_SCHEDULED = set()
+
+def schedule_process_pending(chat_id):
+    global GLOBAL_PENDING_SCHEDULED
+    if chat_id in GLOBAL_PENDING_SCHEDULED:
+        return
+    GLOBAL_PENDING_SCHEDULED.add(chat_id)
+    timer = threading.Timer(5.0, process_pending_wrapper, args=[chat_id])
+    timer.start()
+
+def process_pending_wrapper(chat_id):
+    global GLOBAL_PENDING_SCHEDULED
+    process_pending_ttn(chat_id)
+    GLOBAL_PENDING_SCHEDULED.discard(chat_id)
+
+# ======= Функції для роботи з таблицею TTН (для офісу) =======
+# Для офісу перевірка залишається аналогічною, проте при перевірці завантажується весь аркуш у файл (наприклад, office_ttn_cache.json)
+def fetch_office_ttn_table():
     try:
-        records = worksheet_ttn.get_all_values()
-        row_count = len(records)
-        if row_count > 1:
-            empty_data = [[""] * 3 for _ in range(row_count - 1)]
-            worksheet_ttn.update(f"A2:C{row_count}", empty_data)
-            # Очищення форматування для діапазону клітинок A2:C_lastRow:
-            requests = [
-                {
-                    "repeatCell": {
-                        "range": {
-                            "sheetId": worksheet_ttn.id,
-                            "startRowIndex": 1,       # рядок 2 (індекс 1)
-                            "endRowIndex": row_count,   # до кінця
-                            "startColumnIndex": 0,      # стовпець A (індекс 0)
-                            "endColumnIndex": 3         # до стовпця C (end=3)
-                        },
-                        "cell": {"userEnteredFormat": {}},
-                        "fields": "userEnteredFormat"
-                    }
-                }
-            ]
-            sheet_ttn.batch_update({"requests": requests})
-            print("TTN sheet cleared successfully (contents and formatting).")
+        data = worksheet_ttn.get_all_values()
+        with open("office_ttn_cache.json", "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return data
     except Exception as e:
-        print("Error clearing TTN sheet:", e)
-        notify_admins(f"Error clearing TTN sheet: {e}")
+        print("Error fetching office TTN table:", e)
+        notify_admins(f"Error fetching office TTN table: {e}")
+        return None
 
-def run_clear_ttn_sheet_with_tz():
-    tz_kiev = pytz.timezone("Europe/Kiev")
-    now_kiev = datetime.now(tz_kiev)
-    if now_kiev.strftime("%H:%M") == "00:00":
-        clear_ttn_sheet()
-
-# ======= Періодична реініціалізація Google Sheets (щогодини) =======
-def reinitialize_google_sheets():
-    global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
-    try:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
-        client = gspread.authorize(creds)
-        sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
-        worksheet_ttn = sheet_ttn.sheet1
-        sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
-        worksheet_users = sheet_users.sheet1
-        load_users_cache()
-        print("Google Sheets reinitialized successfully.")
-    except Exception as e:
-        print("Error reinitializing Google Sheets:", e)
-        notify_admins(f"Error reinitializing Google Sheets: {e}")
-
-# ======= Функції для відправлення повідомлень адміністраторам =======
+# ======= Функції для відправлення повідомлень адміністратору =======
 def get_admin_ids():
     admins = []
     users = get_all_users_data()
@@ -215,6 +242,8 @@ def get_admin_ids():
     except Exception as ex:
         print("Error writing admins.json:", ex)
     return admins
+
+LAST_ERROR_NOTIFY = {}
 
 def notify_admins(error_msg):
     admin_ids = get_admin_ids()
@@ -234,8 +263,6 @@ def notify_admins(error_msg):
             bot.send_message(admin_id, f"[ALERT] {error_msg}")
         except Exception as e:
             print(f"Failed to notify admin {admin_id}: {e}")
-
-LAST_ERROR_NOTIFY = {}
 
 # ======= Telegram-бот: Команди та обробники =======
 
@@ -284,7 +311,7 @@ def cmd_cklad(message):
     if not username:
         username = message.from_user.username or ""
     update_user_data(chat_id, "Склад", username, report_time, last_sent)
-    bot.send_message(chat_id, "✅ Ви обрали роль: *Склад*.\n\nНадсилайте ТТН (код або фото), вони обробляться.", parse_mode="Markdown")
+    bot.send_message(chat_id, "✅ Ви обрали роль: *Склад*.\n\nНадсилайте фотографії з ТТН, вони обробляться.", parse_mode="Markdown")
 
 @bot.message_handler(commands=["subscribe"])
 def cmd_subscribe(message):
@@ -335,20 +362,32 @@ def handle_barcode_image(message):
         if not barcodes:
             bot.send_message(chat_id, "❌ Не вдалося розпізнати штрих-коди!")
             return
-        success_count = 0
-        error_count = 0
-        for barcode in barcodes:
-            try:
-                ttn_raw = barcode.data.decode("utf-8")
-                digits = re.sub(r"\D", "", ttn_raw)
-                # Змінено перевірку: тепер TTН має складатися від 10 до 18 цифр
-                if not digits or not (10 <= len(digits) <= 18):
-                    continue
-                handle_ttn_logic(chat_id, digits, username)
-                success_count += 1
-            except Exception as inner_e:
-                error_count += 1
-        bot.send_message(chat_id, f"Оброблено штрих-кодів: успішно: {success_count}, з помилками: {error_count}")
+        # Якщо роль "Склад" – додаємо всі зчитані TTН у pending та плануємо обробку через 5 секунд
+        if role == "Склад":
+            for barcode in barcodes:
+                try:
+                    ttn_raw = barcode.data.decode("utf-8")
+                    digits = re.sub(r"\D", "", ttn_raw)
+                    # Перевірка: тепер ТТН має складатися від 10 до 18 цифр
+                    if not digits or not (10 <= len(digits) <= 18):
+                        continue
+                    add_pending_ttn(chat_id, digits, username)
+                except Exception as inner_e:
+                    print(f"Error processing barcode: {inner_e}")
+            schedule_process_pending(chat_id)
+        else:
+            # Для "Офіс" обробляємо як раніше
+            for barcode in barcodes:
+                try:
+                    ttn_raw = barcode.data.decode("utf-8")
+                    digits = re.sub(r"\D", "", ttn_raw)
+                    if not digits or not (10 <= len(digits) <= 18):
+                        continue
+                    handle_ttn_logic(chat_id, digits, username)
+                except Exception as inner_e:
+                    print(f"Error processing barcode: {inner_e}")
+        # Надсилаємо підсумкове повідомлення, якщо потрібно
+        bot.send_message(chat_id, "Ваші фото оброблено.")
     except Exception as e:
         bot.send_message(chat_id, "❌ Помилка обробки зображення, спробуйте ще раз!")
         print(e)
@@ -360,7 +399,6 @@ def handle_text_message(message):
         return
     chat_id = str(message.chat.id)
     digits = re.sub(r"\D", "", message.text)
-    # Оновлено перевірку на довжину коду: має бути 10-18 цифр
     if digits and 10 <= len(digits) <= 18:
         role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
         if not role:
@@ -371,13 +409,78 @@ def handle_text_message(message):
 def handle_ttn_logic(chat_id, ttn, username):
     role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if role == "Склад":
-        add_ttn_to_sheet(ttn, username, chat_id)
+        # Для складу – використовуємо новий алгоритм з pending
+        add_pending_ttn(chat_id, ttn, username)
+        schedule_process_pending(chat_id)
     elif role == "Офіс":
         check_ttn_in_sheet(chat_id, ttn)
     else:
         bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
 
-# ======= Розсилка звітів підписникам =======
+# ======= Функції для обробки pending TTН для складу =======
+
+def bulk_upload_pending_ttn(chat_id, records):
+    try:
+        rows = [[rec["ttn"], rec["time"], rec["username"]] for rec in records]
+        worksheet_ttn.append_rows(rows, value_input_option="USER_ENTERED")
+        return True
+    except Exception as e:
+        print("Error in bulk upload:", e)
+        notify_admins(f"Bulk upload error for chat {chat_id}: {e}")
+        return False
+
+def fetch_ttn_table():
+    try:
+        data = worksheet_ttn.get_all_values()
+        with open("ttn_table_cache.json", "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return data
+    except Exception as e:
+        print("Error fetching TTН table:", e)
+        notify_admins(f"Error fetching TTН table: {e}")
+        return None
+
+def process_pending_ttn(chat_id):
+    pending = load_pending_ttn()
+    if chat_id not in pending or not pending[chat_id]:
+        return
+    ttns = [rec["ttn"] for rec in pending[chat_id]]
+    bot.send_message(chat_id, "Обробляються наступні ТТН:\n" + "\n".join(f"- {x}" for x in ttns))
+    if not bulk_upload_pending_ttn(chat_id, pending[chat_id]):
+        bot.send_message(chat_id, "❌ Помилка завантаження ТТН до таблиці.")
+        notify_admins(f"Bulk upload failed for chat {chat_id}. Pending TTН: {pending[chat_id]}")
+        return
+    table_data = fetch_ttn_table()
+    if table_data is None:
+        bot.send_message(chat_id, "❌ Таблиця недоступна. ТТН передано адміну для перевірки.")
+        notify_admins(f"Failed to fetch TTН table for verification. Pending: {pending[chat_id]}")
+        return
+    table_ttns = [row[0] for row in table_data[1:]]
+    missing = [rec["ttn"] for rec in pending[chat_id] if rec["ttn"] not in table_ttns]
+    if missing:
+        bot.send_message(chat_id, f"❌ Деякі ТТН не додано до таблиці: {', '.join(missing)}")
+        notify_admins(f"Verification failed for chat {chat_id}. Missing: {missing}. Pending: {pending[chat_id]}")
+    else:
+        bot.send_message(chat_id, "✅ Усі ТТН успішно додано до таблиці.")
+    pending[chat_id] = []
+    save_pending_ttn(pending)
+
+GLOBAL_PENDING_SCHEDULED = set()
+
+def schedule_process_pending(chat_id):
+    global GLOBAL_PENDING_SCHEDULED
+    if chat_id in GLOBAL_PENDING_SCHEDULED:
+        return
+    GLOBAL_PENDING_SCHEDULED.add(chat_id)
+    timer = threading.Timer(5.0, process_pending_wrapper, args=[chat_id])
+    timer.start()
+
+def process_pending_wrapper(chat_id):
+    global GLOBAL_PENDING_SCHEDULED
+    process_pending_ttn(chat_id)
+    GLOBAL_PENDING_SCHEDULED.discard(chat_id)
+
+# ======= Розсилка звітів підписникам (для обох ролей) =======
 def send_subscription_notifications():
     tz = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz)
@@ -401,7 +504,7 @@ def send_subscription_notifications():
                 role, username, report_time, _ , admin_flag = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, report_time, today_str)
 
-# ======= Періодична реініціалізація Google Sheets =======
+# ======= Періодична реініціалізація Google Таблиць =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
@@ -417,7 +520,7 @@ def reinitialize_google_sheets():
         print("Error reinitializing Google Sheets:", e)
         notify_admins(f"Error reinitializing Google Sheets: {e}")
 
-# ======= Функція запуску bot.polling з обробкою помилок =======
+# ======= Запуск bot.polling з обробкою помилок =======
 def run_bot_polling():
     while True:
         try:
