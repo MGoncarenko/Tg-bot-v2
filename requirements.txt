@@ -7,4 +7,4 @@ pyzbar
 schedule
 pytz
 flask
-gspread-formatting
+gspread-formatting>=0.7.1
