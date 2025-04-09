@@ -14,12 +14,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
-from gspread_formatting import clear_formatting  # Для очищення форматування
+from gspread_formatting import clear_formatting  # Для скидання форматування таблиці
 
 # ======= Імпорт конфігурації =======
-# config.py повинен містити наступні змінні:
-# TOKEN, GOOGLE_SHEETS_CREDENTIALS (шлях до JSON файлу), GOOGLE_SHEET_URL (для TTN),
-# GOOGLE_SHEET_URL_USERS (для таблиці користувачів)
+# Файл config.py має містити:
+# TOKEN, GOOGLE_SHEETS_CREDENTIALS (шлях до JSON ключів),
+# GOOGLE_SHEET_URL (для TTН), GOOGLE_SHEET_URL_USERS (для користувачів)
 from config import (
     TOKEN,
     GOOGLE_SHEETS_CREDENTIALS,
@@ -53,16 +53,18 @@ def initialize_google_sheets():
         print("Google Sheets initialized successfully.")
     except Exception as e:
         print("Error initializing Google Sheets:", e)
+        notify_admins(f"Error initializing Google Sheets: {e}")
 
 initialize_google_sheets()
 
 # ======= Кешування даних користувачів =======
-GLOBAL_USERS = {}  # Словник для збереження даних користувачів (з таблиці Users)
+# Зберігаємо дані з таблиці Users у глобальному словнику GLOBAL_USERS
+GLOBAL_USERS = {}
 
 def get_all_users_data():
     data = {}
     try:
-        rows = worksheet_users.get_all_values()  # Перший рядок – заголовки
+        rows = worksheet_users.get_all_values()  # Перший рядок — заголовки
         for row in rows[1:]:
             if len(row) < 6:
                 continue
@@ -71,14 +73,8 @@ def get_all_users_data():
             username = row[2]
             report_time = row[3]
             last_sent = row[4] if len(row) >= 5 else ""
-            admin_flag = row[5].strip().lower() == "admin" if len(row) >= 6 else False
-            data[tg_id] = {
-                "role": role,
-                "username": username,
-                "time": report_time,
-                "last_sent": last_sent,
-                "admin": admin_flag
-            }
+            admin_flag = (row[5].strip().lower() == "admin") if len(row) >= 6 else False
+            data[tg_id] = {"role": role, "username": username, "time": report_time, "last_sent": last_sent, "admin": admin_flag}
     except Exception as e:
         print("Error reading users data:", e)
     return data
@@ -88,7 +84,6 @@ def load_users_cache():
     GLOBAL_USERS = get_all_users_data()
     print("Users cache loaded. Total users:", len(GLOBAL_USERS))
 
-# Викликаємо завантаження користувацьких даних при старті
 load_users_cache()
 
 def get_user_data(tg_id):
@@ -119,19 +114,13 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
             current_row = worksheet_users.row_values(row_index)
             admin_value = current_row[5] if len(current_row) >= 6 else ""
             worksheet_users.update(f"A{row_index}:F{row_index}", [[tg_id, role, username, report_time, last_sent, admin_value]])
-        # Оновлюємо кеш
-        GLOBAL_USERS[tg_id] = {
-            "role": role,
-            "username": username,
-            "time": report_time,
-            "last_sent": last_sent,
-            "admin": GLOBAL_USERS.get(tg_id, {}).get("admin", False)
-        }
+        GLOBAL_USERS[tg_id] = {"role": role, "username": username, "time": report_time, "last_sent": last_sent, "admin": GLOBAL_USERS.get(tg_id, {}).get("admin", False)}
     except Exception as e:
         print("Error updating user data:", e)
+        notify_admins(f"Error updating user data for {tg_id}: {e}")
 
-# ======= Функції роботи з таблицею TTN =======
-# Таблиця TTN має заголовки: A: TTN, B: Дата, C: Нікнейм
+# ======= Функції роботи з таблицею TTН =======
+# Таблиця TTН має заголовки: A – TTН, B – Дата, C – Нікнейм
 def add_ttn_to_sheet(ttn, username, chat_id):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -168,11 +157,11 @@ def clear_ttn_sheet():
         if row_count > 1:
             empty_data = [[""] * 3 for _ in range(row_count - 1)]
             worksheet_ttn.update(f"A2:C{row_count}", empty_data)
-            # Очищення форматування у всьому діапазоні, де були дані (наприклад, A2:C{row_count})
+            # Скидання форматування (наприклад, якщо клітинки були зафарбовані)
             clear_formatting(worksheet_ttn, f"A2:C{row_count}")
             print("TTN sheet cleared successfully (contents and formatting).")
     except Exception as e:
-        print("Помилка при очищенні таблиці TTN:", e)
+        print("Error clearing TTN sheet:", e)
         notify_admins(f"Error clearing TTN sheet: {e}")
 
 def run_clear_ttn_sheet_with_tz():
@@ -181,7 +170,7 @@ def run_clear_ttn_sheet_with_tz():
     if now_kiev.strftime("%H:%M") == "00:00":
         clear_ttn_sheet()
 
-# ======= Функція реініціалізації Google Sheets (щогодини) =======
+# ======= Періодична реініціалізація Google Sheets (щогодини) =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
@@ -197,14 +186,13 @@ def reinitialize_google_sheets():
         print("Error reinitializing Google Sheets:", e)
         notify_admins(f"Error reinitializing Google Sheets: {e}")
 
-# ======= Функція для відправлення повідомлень адміністраторам =======
+# ======= Функції для відправлення повідомлень адміністраторам =======
 def get_admin_ids():
     admins = []
     users = get_all_users_data()
     for tg_id, info in users.items():
         if info.get("admin", False):
             admins.append(tg_id)
-    # Також можна записати у локальний файл:
     try:
         with open("admins.json", "w", encoding="utf-8") as f:
             json.dump(admins, f)
@@ -217,14 +205,26 @@ def notify_admins(error_msg):
     if not admin_ids:
         print("No admin IDs available to notify.")
         return
+    # Запобігаємо надсиланню повторних повідомлень за один тип помилки протягом інтервалу.
+    # Використовуємо глобальний словник для зберігання останніх сповіщень.
+    global LAST_ERROR_NOTIFY
+    now = datetime.now()
+    interval = timedelta(minutes=10)
+    key = error_msg  # ключ можна сформувати за текстом помилки
+    last_time = LAST_ERROR_NOTIFY.get(key)
+    if last_time and now - last_time < interval:
+        return  # не надсилати, якщо повідомлення вже надсилали нещодавно
+    LAST_ERROR_NOTIFY[key] = now
     for admin_id in admin_ids:
         try:
             bot.send_message(admin_id, f"[ALERT] {error_msg}")
         except Exception as e:
             print(f"Failed to notify admin {admin_id}: {e}")
 
-# ======= Telegram-бот: Команди та обробники =======
+# Глобальний словник для відстеження останніх сповіщень про помилки
+LAST_ERROR_NOTIFY = {}
 
+# ======= Telegram-бот: Команди та обробники =======
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
@@ -380,12 +380,12 @@ def send_subscription_notifications():
                     count_ttn = sum(1 for x in col_a if x.strip() != "")
                 except Exception as e:
                     count_ttn = "Невідомо (помилка)"
-                    notify_admins(f"Error counting TTN for chat {chat_id}: {e}")
+                    notify_admins(f"Error counting TTН for chat {chat_id}: {e}")
                 bot.send_message(chat_id, f"За сьогодні оброблено ТТН: {count_ttn}")
                 role, username, report_time, _ , admin_flag = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, report_time, today_str)
 
-# ======= Періодична реініціалізація Google Sheets =======
+# ======= Функція періодичної реініціалізації Google Sheets =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
@@ -401,6 +401,18 @@ def reinitialize_google_sheets():
         print("Error reinitializing Google Sheets:", e)
         notify_admins(f"Error reinitializing Google Sheets: {e}")
 
+# ======= Функція запуску бот polling з обробкою помилок =======
+def run_bot_polling():
+    while True:
+        try:
+            bot.polling()
+        except Exception as e:
+            error_text = f"Polling error: {e}"
+            print(error_text)
+            notify_admins(error_text)
+            reinitialize_google_sheets()
+            time.sleep(10)  # пауза перед повторною спробою
+
 # ======= Планувальник (schedule) =======
 def run_scheduler():
     schedule.every().minute.do(send_subscription_notifications)
@@ -412,7 +424,7 @@ def run_scheduler():
 
 # ======= Основна функція =======
 def main():
-    # Завантажуємо список адміністративних ID при старті
+    # Завантажуємо список адміністраторських ID при старті (з таблиці)
     admins = get_admin_ids()
     if admins:
         print("Loaded admin IDs:", admins)
@@ -422,7 +434,7 @@ def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    bot_thread = threading.Thread(target=bot.polling, daemon=True)
+    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
     bot_thread.start()
     
     try:
