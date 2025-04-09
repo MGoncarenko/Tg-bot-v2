@@ -21,5 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копіюємо весь проєкт (за винятком того, що у .dockerignore)
 COPY . .
 
+RUN pip freeze
+
 # Запускаємо бот
 CMD ["python", "bot.py"]
