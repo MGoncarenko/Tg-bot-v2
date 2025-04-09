@@ -25,6 +25,8 @@ from config import (
     GOOGLE_SHEET_URL_USERS,
 )
 
+bot = telebot.TeleBot(TOKEN)
+
 # ======= Flask-сервер для пінгування (UptimeRobot) =======
 app = Flask(__name__)
 
