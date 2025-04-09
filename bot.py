@@ -14,6 +14,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
+from gspread_formatting import clear_formatting  # Для скидання форматування таблиці
 
 # ======= Імпорт конфігурації =======
 # Файл config.py має містити:
@@ -25,6 +26,8 @@ from config import (
     GOOGLE_SHEET_URL_USERS,
 )
 
+# ======= Створення об’єкта бота =======
+# Переконуємося, що ця стрічка знаходиться до всіх звернень до bot
 bot = telebot.TeleBot(TOKEN)
 
 # ======= Flask-сервер для пінгування (UptimeRobot) =======
@@ -119,7 +122,7 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
         notify_admins(f"Error updating user data for {tg_id}: {e}")
 
 # ======= Функції роботи з таблицею TTН =======
-# Таблиця TTН має заголовки в першому рядку: A: TTН, B: Дата, C: Нікнейм
+# Таблиця TTН має заголовки: A: TTН, B: Дата, C: Нікнейм
 def add_ttn_to_sheet(ttn, username, chat_id):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -150,31 +153,24 @@ def check_ttn_in_sheet(chat_id, ttn):
         notify_admins(f"Error in check_ttn_in_sheet for chat_id {chat_id}: {e}")
 
 def clear_ttn_sheet():
-    """
-    Очищає дані TTН (починаючи з другого рядка) та скидає форматування (кольори, шрифти, тощо)
-    для діапазону клітинок A2:C(останній рядок). Індексація рядків починається з 0, тому рядок 1 (заголовок)
-    залишається незмінним.
-    """
     try:
         records = worksheet_ttn.get_all_values()
         row_count = len(records)
         if row_count > 1:
             empty_data = [[""] * 3 for _ in range(row_count - 1)]
             worksheet_ttn.update(f"A2:C{row_count}", empty_data)
-            # Використовуємо batch_update для очищення форматування:
+            # Очищення форматування для діапазону клітинок A2:C_lastRow:
             requests = [
                 {
                     "repeatCell": {
                         "range": {
                             "sheetId": worksheet_ttn.id,
-                            "startRowIndex": 1,       # рядок 2: індекс 1
-                            "endRowIndex": row_count,   # до останнього рядка
-                            "startColumnIndex": 0,      # стовпець A: індекс 0
-                            "endColumnIndex": 3         # стовпець C: індекс 2, тому end=3
+                            "startRowIndex": 1,       # рядок 2 (індекс 1)
+                            "endRowIndex": row_count,   # до кінця
+                            "startColumnIndex": 0,      # стовпець A (індекс 0)
+                            "endColumnIndex": 3         # до стовпця C (end=3)
                         },
-                        "cell": {
-                            "userEnteredFormat": {}
-                        },
+                        "cell": {"userEnteredFormat": {}},
                         "fields": "userEnteredFormat"
                     }
                 }
@@ -191,7 +187,7 @@ def run_clear_ttn_sheet_with_tz():
     if now_kiev.strftime("%H:%M") == "00:00":
         clear_ttn_sheet()
 
-# ======= Функції періодичної реініціалізації Google Sheets (щогодини) =======
+# ======= Періодична реініціалізація Google Sheets (щогодини) =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
@@ -243,6 +239,7 @@ def notify_admins(error_msg):
 LAST_ERROR_NOTIFY = {}
 
 # ======= Telegram-бот: Команди та обробники =======
+
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
@@ -345,6 +342,7 @@ def handle_barcode_image(message):
             try:
                 ttn_raw = barcode.data.decode("utf-8")
                 digits = re.sub(r"\D", "", ttn_raw)
+                # Змінено перевірку: тепер TTН має складатися від 10 до 18 цифр
                 if not digits or not (10 <= len(digits) <= 18):
                     continue
                 handle_ttn_logic(chat_id, digits, username)
@@ -363,7 +361,8 @@ def handle_text_message(message):
         return
     chat_id = str(message.chat.id)
     digits = re.sub(r"\D", "", message.text)
-    if digits and 8 <= len(digits) <= 18:
+    # Оновлено перевірку на довжину коду: має бути 10-18 цифр
+    if digits and 10 <= len(digits) <= 18:
         role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
         if not role:
             bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
