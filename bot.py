@@ -14,7 +14,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
-from gspread_formatting import clear_formatting  # Для скидання форматування таблиці
 
 # ======= Імпорт конфігурації =======
 # Файл config.py має містити:
