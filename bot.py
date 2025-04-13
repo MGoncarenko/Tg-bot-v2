@@ -17,7 +17,7 @@ import pytz
 from flask import Flask
 
 # ======= Імпорт конфігурації =======
-# Файл config.py має містити:
+# Файл config.py повинен містити:
 # TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL, GOOGLE_SHEET_URL_USERS
 from config import (
     TOKEN,
@@ -27,11 +27,11 @@ from config import (
 )
 
 # ======= Глобальні змінні для локальних файлів =======
-LOCAL_OFFICE_FILE = "local_office.csv"       # дані для офісу
-LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # дані для складу (з індексацією)
-LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл
+LOCAL_OFFICE_FILE = "local_office.csv"       # для офісу
+LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # для складу (індексація)
+LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл (тепер з полями: TTN і Username)
 
-# Оновлено: тепер буфер містить TTН та Username
+# Заголовки. Зверніть увагу: для буфера додано стовпець Username.
 OFFICE_HEADERS = ["row", "TTN", "Date", "Username"]
 WAREHOUSE_HEADERS = ["row", "TTN", "Date", "Username"]
 BUFFER_HEADERS = ["TTN", "Username"]
@@ -195,10 +195,30 @@ def notify_admins(error_msg):
 
 LAST_ERROR_NOTIFY = {}
 
-# Placeholder для очищення TTН (якщо потрібно)
+# ======= Функція очищення таблиць з TTН (але не таблиці користувачів) =======
 def clear_ttn_sheet():
-    # Тут можна реалізувати логіку очищення Google таблиці TTН, якщо потрібно
-    pass
+    """
+    Очищає дані з Google таблиці TTН (залишаючи заголовок, без форматування)
+    та локальні файли (local_office.csv і local_warehouse.csv), зберігаючи заголовки.
+    """
+    try:
+        # Зберігаємо заголовок
+        header = worksheet_ttn.row_values(1)
+        # Очищаємо весь вміст, включно з форматуванням
+        worksheet_ttn.clear()
+        # Відновлюємо заголовок
+        worksheet_ttn.append_row(header)
+        print("Google Sheet TTН таблиця очищена.")
+    except Exception as e:
+        print("Error clearing Google Sheet TTН table:", e)
+        notify_admins(f"Error clearing Google Sheet TTН table: {e}")
+    try:
+        write_csv_file(LOCAL_OFFICE_FILE, OFFICE_HEADERS, [])
+        write_csv_file(LOCAL_WAREHOUSE_FILE, WAREHOUSE_HEADERS, [])
+        print("Локальні TTН таблиці очищені.")
+    except Exception as e:
+        print("Error clearing local TTН files:", e)
+        notify_admins(f"Error clearing local TTН files: {e}")
 
 # ======= Функції для роботи з локальними файлами TTН =======
 
@@ -264,10 +284,14 @@ def update_local_warehouse_from_buffer():
             next_row = 2
         for entry in buffer_rows:
             ttn_val = entry["TTN"]
-            username_val = entry.get("Username", "")
             if ttn_val not in existing_ttns:
                 now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%H:%M:%S")
-                new_row = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": username_val}
+                new_row = {
+                    "row": str(next_row),
+                    "TTN": ttn_val,
+                    "Date": now,
+                    "Username": entry.get("Username", "")
+                }
                 append_csv_row(LOCAL_WAREHOUSE_FILE, new_row, WAREHOUSE_HEADERS)
                 next_row += 1
         print("Local warehouse file updated from buffer.")
@@ -312,29 +336,27 @@ def start_buffer_timer(chat_id):
             threading.Thread(target=buffer_timer_thread, args=(chat_id,), daemon=True).start()
 
 def buffer_timer_thread(chat_id):
-    time.sleep(5)  # Затримка 5 секунд для акумуляції нових TTН
+    time.sleep(5)  # 5-секундна затримка для акумуляції нових TTН у буфері
     process_buffer(chat_id)
     global BUFFER_PROCESSING_TIMER_RUNNING
     with BUFFER_PROCESSING_LOCK:
         BUFFER_PROCESSING_TIMER_RUNNING = False
 
-# ======= Обробка буфера з оновленою логікою =======
+# ======= Обробка буфера (оновлена логіка) =======
 def process_buffer(chat_id):
     """
-    Обробляє буферний файл:
+    Обробляє буфер:
       1. Переносить нові TTН з буфера у local_warehouse.csv.
       2. Пушить нові записи (за індексацією) з local_warehouse.csv до Google Sheet.
       3. Оновлює local_office.csv із Google таблиці.
-      4. Порівнює TTН з буфера з даними з local_office.csv, формуючи списки доданих і не доданих.
-      5. Надсилає повідомлення користувачу (роль "Склад") – кожен TTН з нового рядка.
+      4. Порівнює TTН з буфера з даними з local_office.csv,
+         формуючи списки доданих і не доданих.
+      5. Надсилає повідомлення користувачу (Склад) з переліком (кожен код на новому рядку).
       6. Очищає буфер.
     """
     try:
-        # 1. Оновлюємо local_warehouse із буфера
         update_local_warehouse_from_buffer()
-        # 2. Пушимо нові записи з local_warehouse до Google Sheet
         push_local_warehouse_to_google()
-        # 3. Оновлюємо local_office із Google Sheet
         update_local_office_from_google()
     except Exception as e:
         print("Google Sheets query failed. Comparing local files directly.")
@@ -351,7 +373,7 @@ def process_buffer(chat_id):
                 for t in missing:
                     writer.writerow({"TTN": t})
             notify_admins(f"Failed to update from Google Sheets. Missing TTНs: {missing}. See attached file {diff_file}.")
-    # 4. Порівнюємо буфер з офісним файлом
+    # Порівнюємо вміст буфера з даними local_office.csv
     _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
     _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
     office_ttns = {r["TTN"] for r in office_rows}
@@ -363,29 +385,26 @@ def process_buffer(chat_id):
             added.append(ttn_val)
         else:
             not_added.append(ttn_val)
-    # 5. Формуємо повідомлення: кожен TTН з нового рядка
-    msg_lines = []
+    # Формуємо повідомлення: кожен код з нового рядка
+    msg = "Оновлення:\n"
     if added:
-        msg_lines.append("Додано:")
-        msg_lines.extend(added)
+        msg += "Додано:\n" + "\n".join(added) + "\n"
     if not_added:
-        msg_lines.append("Не додано:")
-        msg_lines.extend(not_added)
-    msg = "\n".join(msg_lines)
+        msg += "Не додано:\n" + "\n".join(not_added)
     bot.send_message(chat_id, msg)
-    # 6. Очищаємо буфер
     write_csv_file(LOCAL_BUFFER_FILE, BUFFER_HEADERS, [])
     print("Buffer cleared.")
 
 def add_ttn_to_buffer(ttn, username):
     """
-    Додає TTН та нік користувача до буферного файлу, якщо TTН ще не існує.
+    Додає TTН та Username до буферного файлу, якщо ще не існує.
     """
     _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
     existing = {r["TTN"] for r in buffer_rows}
     if ttn not in existing:
-        append_csv_row(LOCAL_BUFFER_FILE, {"TTN": ttn, "Username": username}, BUFFER_HEADERS)
-        print(f"TTН {ttn} додано до буфера з Username {username}.")
+        row = {"TTN": ttn, "Username": username}
+        append_csv_row(LOCAL_BUFFER_FILE, row, BUFFER_HEADERS)
+        print(f"TTН {ttn} додано до буфера.")
 
 def check_ttn_in_local_office(chat_id, ttn):
     """
@@ -402,7 +421,6 @@ def handle_ttn_logic(chat_id, ttn, username):
     role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if role == "Склад":
         add_ttn_to_buffer(ttn, username)
-        # Запускаємо 5-секундну затримку для акумуляції нових записів
         start_buffer_timer(chat_id)
     elif role == "Офіс":
         check_ttn_in_local_office(chat_id, ttn)
@@ -410,7 +428,6 @@ def handle_ttn_logic(chat_id, ttn, username):
         bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /Office або /Cklad")
 
 # ======= Обробники команд Telegram-бота =======
-
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
@@ -516,7 +533,7 @@ def handle_barcode_image(message):
                     continue
                 if role == "Склад":
                     add_ttn_to_buffer(digits, username)
-                    start_buffer_timer(chat_id)  # Запускаємо таймер обробки буфера
+                    start_buffer_timer(chat_id)
                 else:
                     check_ttn_in_local_office(chat_id, digits)
                 success_count += 1
@@ -545,7 +562,13 @@ def handle_text_message(message):
         else:
             check_ttn_in_local_office(chat_id, digits)
 
+# ======= Функції звітування та очищення TTН =======
 def send_subscription_notifications():
+    """
+    Перевіряє час підписки кожного користувача і, якщо настав час,
+    надсилає повідомлення з кількістю TTН (з local_office.csv) доданих за день.
+    Після відправлення повідомлення поле last_sent оновлюється, щоб не надсилати повторно.
+    """
     tz = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz)
     current_time_str = now.strftime("%H:%M")
@@ -568,6 +591,9 @@ def send_subscription_notifications():
                 update_user_data(chat_id, role, username, rt, today_str)
 
 def run_clear_ttn_sheet_with_tz():
+    """
+    Якщо київський час показує 00:00, викликається очищення Google таблиці та локальних файлів TTН.
+    """
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
     if now_kiev.strftime("%H:%M") == "00:00":
@@ -583,7 +609,7 @@ def reinitialize_google_sheets():
         sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
         worksheet_users = sheet_users.sheet1
         load_users_cache()
-        # Оновлюємо обидва файли з даними з Google Sheets:
+        # Оновлюємо обидва локальні файли з даними з Google Sheets:
         update_local_office_from_google()
         update_local_warehouse_from_google()
         print("Google Sheets reinitialized successfully.")
@@ -610,6 +636,7 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(30)
 
+# ======= Основна функція =======
 def main():
     # При старті оновлюємо обидва локальні файли з даними з Google Sheets
     update_local_office_from_google()
