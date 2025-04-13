@@ -1,5 +1,6 @@
 import os
 import re
+import csv
 import json
 import threading
 import time
@@ -14,17 +15,58 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
+from gspread_formatting import clear_formatting  # для скидання форматування клітинок
 
-# ======= Імпорт конфігурації =======
-# Файл config.py має містити наступні змінні:
-# TOKEN, GOOGLE_SHEETS_CREDENTIALS (шлях до JSON ключів),
-# GOOGLE_SHEET_URL (для TTН) та GOOGLE_SHEET_URL_USERS (для даних користувачів)
+# ======= Імпорт конфігурації (ключі та URL таблиць) =======
+# config.py має містити:
+# TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL (для TTН), GOOGLE_SHEET_URL_USERS (для користувачів)
 from config import (
     TOKEN,
     GOOGLE_SHEETS_CREDENTIALS,
     GOOGLE_SHEET_URL,
     GOOGLE_SHEET_URL_USERS,
 )
+
+# ======= Глобальні змінні для локальних файлів =======
+LOCAL_OFFICE_FILE = "local_office.csv"       # для офісу
+LOCAL_WAREHOUSE_FILE = "local_warehouse.csv" # для складу
+LOCAL_BUFFER_FILE = "local_buffer.csv"       # буферний файл
+
+OFFICE_HEADERS = ["row", "TTN", "Date", "Username"]
+WAREHOUSE_HEADERS = ["row", "TTN", "Date", "Username"]
+BUFFER_HEADERS = ["TTN"]
+
+# Функції для роботи з CSV файлами
+def ensure_local_file(filename, headers):
+    if not os.path.exists(filename):
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+
+def read_csv_file(filename):
+    try:
+        with open(filename, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            return reader.fieldnames, list(reader)
+    except Exception as e:
+        return None, []
+
+def write_csv_file(filename, headers, rows):
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+def append_csv_row(filename, row, headers):
+    with open(filename, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writerow(row)
+
+# Забезпечуємо наявність локальних файлів
+for fname, hdr in [(LOCAL_OFFICE_FILE, OFFICE_HEADERS),
+                   (LOCAL_WAREHOUSE_FILE, WAREHOUSE_HEADERS),
+                   (LOCAL_BUFFER_FILE, BUFFER_HEADERS)]:
+    ensure_local_file(fname, hdr)
 
 # ======= Створення об’єкта бота =======
 bot = telebot.TeleBot(TOKEN)
@@ -65,7 +107,7 @@ GLOBAL_USERS = {}
 def get_all_users_data():
     data = {}
     try:
-        rows = worksheet_users.get_all_values()  # Перший рядок – заголовки
+        rows = worksheet_users.get_all_values()  # Перший рядок – заголовки (A: Tg ID, B: Роль, C: Tg нік, D: Час для звіту, E: Останній звіт, F: Admin)
         for row in rows[1:]:
             if len(row) < 6:
                 continue
@@ -120,144 +162,139 @@ def update_user_data(tg_id, role, username, report_time, last_sent=""):
         print("Error updating user data:", e)
         notify_admins(f"Error updating user data for {tg_id}: {e}")
 
-# ======= Локальні файли для обробки TTН для складу =======
-PENDING_TTN_FILE = "pending_ttn.json"
-TTN_TABLE_CACHE_FILE = "ttn_table_cache.json"
+# ======= Функції для роботи з локальними файлами TTН =======
 
-def load_pending_ttn():
+def update_local_office_from_google():
+    """
+    Зчитуємо дані з Google таблиці TTН (worksheet_ttn) та записуємо у local_office.csv.
+    Зберігаємо індексацію рядків (Google Sheets: перший рядок – заголовок, починаючи з 2-го).
+    """
     try:
-        with open(PENDING_TTN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}  # Структура: { chat_id: [ {"ttn": ..., "time": ..., "username": ...}, ... ] }
-
-def save_pending_ttn(pending):
-    try:
-        with open(PENDING_TTN_FILE, "w", encoding="utf-8") as f:
-            json.dump(pending, f)
+        records = worksheet_ttn.get_all_values()  # всі рядки (перший — заголовки)
+        office_rows = []
+        for i, row in enumerate(records, start=1):
+            if i == 1:
+                continue  # пропускаємо заголовок
+            office_rows.append({
+                "row": str(i),
+                "TTN": row[0] if len(row) > 0 else "",
+                "Date": row[1] if len(row) > 1 else "",
+                "Username": row[2] if len(row) > 2 else ""
+            })
+        write_csv_file(LOCAL_OFFICE_FILE, OFFICE_HEADERS, office_rows)
+        print("Local office file updated from Google Sheets.")
     except Exception as e:
-        print("Error saving pending TTNs:", e)
-        notify_admins(f"Error saving pending TTNs: {e}")
+        print("Error updating local office file from Google Sheets:", e)
+        notify_admins(f"Error updating local office file from Google Sheets: {e}")
+        raise
 
-def add_pending_ttn(chat_id, ttn, username):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    pending = load_pending_ttn()
-    if chat_id not in pending:
-        pending[chat_id] = []
-    pending[chat_id].append({"ttn": ttn, "time": now, "username": username})
-    save_pending_ttn(pending)
-
-# ======= Обробка накопичених TTН для складу =======
-def bulk_upload_pending_ttn(chat_id, records):
+def update_local_warehouse_from_buffer():
+    """
+    Зчитуємо TTН з буферного файлу (local_buffer.csv) та додаємо нові рядки у local_warehouse.csv.
+    Якщо TTН вже є – не додаємо.
+    Рядок (номер) генерується як останній номер + 1.
+    """
     try:
-        rows = [[rec["ttn"], rec["time"], rec["username"]] for rec in records]
-        worksheet_ttn.append_rows(rows, value_input_option="USER_ENTERED")
-        return True
+        _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+        _, warehouse_rows = read_csv_file(LOCAL_WAREHOUSE_FILE)
+        existing_ttns = {r["TTN"] for r in warehouse_rows}
+        # Визначаємо останнє значення "row"
+        if warehouse_rows:
+            next_row = max(int(r["row"]) for r in warehouse_rows) + 1
+        else:
+            next_row = 2  # якщо файл порожній, номер першого запису – 2
+        for entry in buffer_rows:
+            ttn_val = entry["TTN"]
+            if ttn_val not in existing_ttns:
+                now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
+                new_row = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": ""}
+                append_csv_row(LOCAL_WAREHOUSE_FILE, new_row, WAREHOUSE_HEADERS)
+                next_row += 1
+        print("Local warehouse file updated from buffer.")
     except Exception as e:
-        print("Error in bulk upload:", e)
-        notify_admins(f"Bulk upload error for chat {chat_id}: {e}")
-        return False
+        print("Error updating local warehouse from buffer:", e)
+        notify_admins(f"Error updating local warehouse from buffer: {e}")
+        raise
 
-def fetch_ttn_table():
+def process_buffer(chat_id):
+    """
+    Основна функція обробки буферного файлу:
+    1. Переносить усі нові TTН з буферного файлу у local_warehouse.csv.
+    2. Оновлює local_office.csv з Google таблиці TTН.
+    3. Порівнює TTН з буферного файлу з тими, що є у local_office.csv і створює списки доданих та не доданих.
+    4. Встановлює 5-секундну затримку.
+    5. Надсилає повідомлення користувачу (роль "Склад") з переліком.
+    6. Очищає буферний файл.
+    """
     try:
-        data = worksheet_ttn.get_all_values()
-        with open(TTN_TABLE_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        return data
+        # 1. Переносимо з буфера до local warehouse:
+        update_local_warehouse_from_buffer()
+        # 2. Оновлюємо local office з Google таблиці:
+        update_local_office_from_google()
     except Exception as e:
-        print("Error fetching TTN table:", e)
-        notify_admins(f"Error fetching TTN table: {e}")
-        return None
+        # Якщо виникла помилка при запиті до Google таблиці, порівнюємо local warehouse з local office:
+        print("Google Sheets query failed. Comparing local files directly.")
+        _, warehouse_rows = read_csv_file(LOCAL_WAREHOUSE_FILE)
+        _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+        warehouse_ttns = {r["TTN"] for r in warehouse_rows}
+        office_ttns = {r["TTN"] for r in office_rows}
+        missing = list(warehouse_ttns - office_ttns)
+        if missing:
+            diff_file = "diff_missing.csv"
+            with open(diff_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["TTN"])
+                writer.writeheader()
+                for t in missing:
+                    writer.writerow({"TTN": t})
+            notify_admins(f"Failed to update from Google Sheets. Missing TTNs: {missing}. See attached file {diff_file}.")
+    # 3. Зчитуємо буфер, щоб визначити, які TTН були додані
+    _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+    office_ttns = {r["TTN"] for r in office_rows}
+    added = []
+    not_added = []
+    for entry in buffer_rows:
+        ttn_val = entry["TTN"]
+        if ttn_val in office_ttns:
+            added.append(ttn_val)
+        else:
+            not_added.append(ttn_val)
+    # 4. Затримка 5 секунд
+    time.sleep(5)
+    # 5. Надсилаємо повідомлення користувачу (для складу)
+    msg = "Оновлення:\n"
+    if added:
+        msg += "Додано: " + ", ".join(added) + "\n"
+    if not_added:
+        msg += "Не додано: " + ", ".join(not_added)
+    bot.send_message(chat_id, msg)
+    # 6. Очищаємо буферний файл (перезаписуємо лише заголовок)
+    write_csv_file(LOCAL_BUFFER_FILE, BUFFER_HEADERS, [])
+    print("Buffer cleared.")
 
-def process_pending_ttn(chat_id):
-    pending = load_pending_ttn()
-    if chat_id not in pending or not pending[chat_id]:
-        return
-    ttns = [rec["ttn"] for rec in pending[chat_id]]
-    bot.send_message(chat_id, "Обробляються наступні TTН:\n" + "\n".join(f"- {x}" for x in ttns))
-    if not bulk_upload_pending_ttn(chat_id, pending[chat_id]):
-        bot.send_message(chat_id, "❌ Помилка завантаження TTН до таблиці.")
-        notify_admins(f"Bulk upload failed for chat {chat_id}. Pending TTН: {pending[chat_id]}")
-        return
-    table_data = fetch_ttn_table()
-    if table_data is None:
-        bot.send_message(chat_id, "❌ Таблиця недоступна. TTН передано адміну для перевірки.")
-        notify_admins(f"Failed to fetch TTН table for verification. Pending: {pending[chat_id]}")
-        return
-    table_ttns = [row[0] for row in table_data[1:]]
-    missing = [rec["ttn"] for rec in pending[chat_id] if rec["ttn"] not in table_ttns]
-    if missing:
-        bot.send_message(chat_id, f"❌ Деякі TTН не додано до таблиці: {', '.join(missing)}")
-        notify_admins(f"Verification failed for chat {chat_id}. Missing: {missing}. Pending: {pending[chat_id]}")
-    else:
-        bot.send_message(chat_id, "✅ Усі TTН успішно додано до таблиці.")
-    pending[chat_id] = []
-    save_pending_ttn(pending)
+def add_ttn_to_buffer(ttn):
+    """
+    Додає TTН до буферного файлу, якщо ще немає.
+    """
+    _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+    existing = {r["TTN"] for r in buffer_rows}
+    if ttn not in existing:
+        append_csv_row(LOCAL_BUFFER_FILE, {"TTN": ttn}, BUFFER_HEADERS)
+        print(f"TTН {ttn} added to buffer.")
 
-GLOBAL_PENDING_SCHEDULED = set()
+def check_ttn_in_local_office(chat_id, ttn):
+    """
+    Для користувача з роллю "Офіс" перевіряє, чи міститься TTН у локальному файлі для офісу.
+    Якщо знайдено, повідомляє про рядок, інакше надсилає повідомлення, що TTН відсутній.
+    """
+    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+    for row in office_rows:
+        if row["TTN"] == ttn:
+            bot.send_message(chat_id, f"TTН {ttn} знайдено на рядку {row['row']}.")
+            return
+    bot.send_message(chat_id, f"TTН {ttn} не знайдено в локальному файлі.")
 
-def schedule_process_pending(chat_id):
-    global GLOBAL_PENDING_SCHEDULED
-    if chat_id in GLOBAL_PENDING_SCHEDULED:
-        return
-    GLOBAL_PENDING_SCHEDULED.add(chat_id)
-    timer = threading.Timer(5.0, process_pending_wrapper, args=[chat_id])
-    timer.start()
-
-def process_pending_wrapper(chat_id):
-    global GLOBAL_PENDING_SCHEDULED
-    process_pending_ttn(chat_id)
-    GLOBAL_PENDING_SCHEDULED.discard(chat_id)
-
-# ======= Функції для роботи з таблицею TTН (для офісу) =======
-def fetch_office_ttn_table():
-    try:
-        data = worksheet_ttn.get_all_values()
-        with open("office_ttn_cache.json", "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        return data
-    except Exception as e:
-        print("Error fetching office TTН table:", e)
-        notify_admins(f"Error fetching office TTН table: {e}")
-        return None
-
-# ======= Функції для відправлення повідомлень адміністраторам =======
-def get_admin_ids():
-    admins = []
-    users = get_all_users_data()
-    for tg_id, info in users.items():
-        if info.get("admin", False):
-            admins.append(tg_id)
-    try:
-        with open("admins.json", "w", encoding="utf-8") as f:
-            json.dump(admins, f)
-    except Exception as ex:
-        print("Error writing admins.json:", ex)
-    return admins
-
-LAST_ERROR_NOTIFY = {}
-
-def notify_admins(error_msg):
-    admin_ids = get_admin_ids()
-    if not admin_ids:
-        print("No admin IDs available to notify.")
-        return
-    global LAST_ERROR_NOTIFY
-    now = datetime.now()
-    interval = timedelta(minutes=10)
-    key = error_msg
-    last_time = LAST_ERROR_NOTIFY.get(key)
-    if last_time and now - last_time < interval:
-        return
-    LAST_ERROR_NOTIFY[key] = now
-    for admin_id in admin_ids:
-        try:
-            bot.send_message(admin_id, f"[ALERT] {error_msg}")
-        except Exception as e:
-            print(f"Failed to notify admin {admin_id}: {e}")
-
-# ======= Telegram-бот: Команди та обробники =======
-
+# ======= Telegram-бот: Основні команди та обробники =======
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     chat_id = str(message.chat.id)
@@ -268,24 +305,19 @@ def cmd_start(message):
         "Відписатися – командою /unsubscribe."
     )
     if role:
-        bot.send_message(
-            chat_id,
+        bot.send_message(chat_id,
             f"👋 Вітаю! Ваша роль: *{role}*.\n\n"
             "Ви можете змінити роль за допомогою:\n"
             "/Office - Офіс 📑\n"
-            "/Cklad - Склад 📦"
-            f"{subscribe_info}",
-            parse_mode="Markdown"
-        )
+            "/Cklad - Склад 📦" + subscribe_info,
+            parse_mode="Markdown")
     else:
-        bot.send_message(
-            chat_id,
-            "Цей бот спрощує роботу з TTН.\n\n"
+        bot.send_message(chat_id,
+            "Цей бот спрощує роботу з ТТН.\n\n"
             "Оберіть роль:\n"
             "/Office - Офіс 📑\n"
-            "/Cklad - Склад 📦"
-            f"{subscribe_info}"
-        )
+            "/Cklad - Склад 📦" + subscribe_info,
+            parse_mode="Markdown")
 
 @bot.message_handler(commands=["Office"])
 def cmd_office(message):
@@ -294,7 +326,9 @@ def cmd_office(message):
     if not username:
         username = message.from_user.username or ""
     update_user_data(chat_id, "Офіс", username, report_time, last_sent)
-    bot.send_message(chat_id, "✅ Ви обрали роль: *Офіс*.\n\nНадсилайте TTН (код або фото), вони обробляться.", parse_mode="Markdown")
+    bot.send_message(chat_id,
+                     "✅ Ви обрали роль: *Офіс*.\n\nНадсилайте TTН (код або фото) для перевірки.",
+                     parse_mode="Markdown")
 
 @bot.message_handler(commands=["Cklad"])
 def cmd_cklad(message):
@@ -303,7 +337,9 @@ def cmd_cklad(message):
     if not username:
         username = message.from_user.username or ""
     update_user_data(chat_id, "Склад", username, report_time, last_sent)
-    bot.send_message(chat_id, "✅ Ви обрали роль: *Склад*.\n\nНадсилайте фотографії з TTН, вони обробляться.", parse_mode="Markdown")
+    bot.send_message(chat_id,
+                     "✅ Ви обрали роль: *Склад*.\n\nНадсилайте TTН (код або фото), вони зберігатимуться в буфер.",
+                     parse_mode="Markdown")
 
 @bot.message_handler(commands=["subscribe"])
 def cmd_subscribe(message):
@@ -326,7 +362,7 @@ def cmd_subscribe(message):
         if not username:
             username = message.from_user.username or ""
     update_user_data(chat_id, role, username, sub_time, last_sent)
-    bot.send_message(chat_id, f"Ви успішно підписалися на повідомлення о {sub_time}.")
+    bot.send_message(chat_id, f"Ви успішно підписалися на звіт о {sub_time}.")
 
 @bot.message_handler(commands=["unsubscribe"])
 def cmd_unsubscribe(message):
@@ -336,14 +372,14 @@ def cmd_unsubscribe(message):
         bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
         return
     update_user_data(chat_id, role, username, "", last_sent)
-    bot.send_message(chat_id, "Ви успішно відписалися від повідомлень.")
+    bot.send_message(chat_id, "Ви успішно відписалися від звітів.")
 
 @bot.message_handler(content_types=["photo"])
 def handle_barcode_image(message):
     chat_id = str(message.chat.id)
     role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if not role:
-        bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
+        bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
         return
     file_info = bot.get_file(message.photo[-1].file_id)
     downloaded_file = bot.download_file(file_info.file_path)
@@ -354,29 +390,26 @@ def handle_barcode_image(message):
         if not barcodes:
             bot.send_message(chat_id, "❌ Не вдалося розпізнати штрих-коди!")
             return
-        if role == "Склад":
-            for barcode in barcodes:
-                try:
-                    ttn_raw = barcode.data.decode("utf-8")
-                    digits = re.sub(r"\D", "", ttn_raw)
-                    # Перевірка: TTН має містити від 10 до 18 цифр
-                    if not digits or not (10 <= len(digits) <= 18):
-                        continue
-                    add_pending_ttn(chat_id, digits, username)
-                except Exception as inner_e:
-                    print(f"Error processing barcode: {inner_e}")
-            schedule_process_pending(chat_id)
-        else:
-            for barcode in barcodes:
-                try:
-                    ttn_raw = barcode.data.decode("utf-8")
-                    digits = re.sub(r"\D", "", ttn_raw)
-                    if not digits or not (10 <= len(digits) <= 18):
-                        continue
-                    handle_ttn_logic(chat_id, digits, username)
-                except Exception as inner_e:
-                    print(f"Error processing barcode: {inner_e}")
-        bot.send_message(chat_id, "Ваші фото оброблено.")
+        success_count = 0
+        error_count = 0
+        for barcode in barcodes:
+            try:
+                ttn_raw = barcode.data.decode("utf-8")
+                digits = re.sub(r"\D", "", ttn_raw)
+                # Перевірка TTН: лише 10-18 цифр допускається
+                if not digits or not (10 <= len(digits) <= 18):
+                    continue
+                # Для користувача "Склад" записуємо до буфера та обробляємо буфер
+                if role == "Склад":
+                    add_ttn_to_buffer(digits)
+                    process_buffer(chat_id)
+                else:
+                    # Для офісу перевіряємо TTН у локальному файлі для офісу
+                    check_ttn_in_local_office(chat_id, digits)
+                success_count += 1
+            except Exception as inner_e:
+                error_count += 1
+        bot.send_message(chat_id, f"Оброблено штрих-кодів: успішно: {success_count}, з помилками: {error_count}")
     except Exception as e:
         bot.send_message(chat_id, "❌ Помилка обробки зображення, спробуйте ще раз!")
         print(e)
@@ -388,22 +421,115 @@ def handle_text_message(message):
         return
     chat_id = str(message.chat.id)
     digits = re.sub(r"\D", "", message.text)
-    if digits and 10 <= len(digits) <= 18:
+    if digits and (10 <= len(digits) <= 18):
         role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
         if not role:
-            bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
+            bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
             return
-        handle_ttn_logic(chat_id, digits, username)
+        if role == "Склад":
+            add_ttn_to_buffer(digits)
+            process_buffer(chat_id)
+        else:
+            check_ttn_in_local_office(chat_id, digits)
 
 def handle_ttn_logic(chat_id, ttn, username):
     role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if role == "Склад":
-        add_pending_ttn(chat_id, ttn, username)
-        schedule_process_pending(chat_id)
+        add_ttn_to_buffer(ttn)
+        process_buffer(chat_id)
     elif role == "Офіс":
-        check_ttn_in_sheet(chat_id, ttn)
+        check_ttn_in_local_office(chat_id, ttn)
     else:
-        bot.send_message(chat_id, "Спочатку встановіть роль: /Office або /Cklad")
+        bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /Office або /Cklad")
+
+# ======= Функції для роботи з локальними файлами для TTН =======
+
+def add_ttn_to_buffer(ttn):
+    _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+    existing = {r["TTN"] for r in buffer_rows}
+    if ttn not in existing:
+        append_csv_row(LOCAL_BUFFER_FILE, {"TTN": ttn}, BUFFER_HEADERS)
+        print(f"TTН {ttn} додано до буфера.")
+
+def check_ttn_in_local_office(chat_id, ttn):
+    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+    for row in office_rows:
+        if row["TTN"] == ttn:
+            bot.send_message(chat_id, f"TTН {ttn} знайдено в локальному файлі (рядок {row['row']}).")
+            return
+    bot.send_message(chat_id, f"TTН {ttn} не знайдено в локальному файлі.")
+
+def process_buffer(chat_id):
+    try:
+        # 1. Оновлюємо local_warehouse із буфера
+        update_local_warehouse_from_buffer()
+        # 2. Оновлюємо local_office із Google таблиці
+        update_local_office_from_google()
+    except Exception as e:
+        print("Помилка при оновленні з Google таблиці:", e)
+        notify_admins(f"Error updating local_office from Google Sheets: {e}")
+    # 3. Порівнюємо вміст буфера з local_office
+    _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+    office_ttns = {r["TTN"] for r in office_rows}
+    added = []
+    not_added = []
+    for entry in buffer_rows:
+        ttn_val = entry["TTN"]
+        if ttn_val in office_ttns:
+            added.append(ttn_val)
+        else:
+            not_added.append(ttn_val)
+    # 4. Затримка 5 секунд
+    time.sleep(5)
+    # 5. Надсилаємо повідомлення користувачу (Склад)
+    msg = "Оновлення:\n"
+    if added:
+        msg += "Додано: " + ", ".join(added) + "\n"
+    if not_added:
+        msg += "Не додано: " + ", ".join(not_added)
+    bot.send_message(chat_id, msg)
+    # 6. Очищаємо буферний файл
+    write_csv_file(LOCAL_BUFFER_FILE, BUFFER_HEADERS, [])
+    print("Буфер очищено.")
+
+def update_local_warehouse_from_buffer():
+    # Читаємо буфер та local_warehouse, додаємо лише нові TTН
+    _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
+    _, warehouse_rows = read_csv_file(LOCAL_WAREHOUSE_FILE)
+    existing = {r["TTN"] for r in warehouse_rows}
+    if warehouse_rows:
+        next_row = max(int(r["row"]) for r in warehouse_rows) + 1
+    else:
+        next_row = 2
+    for entry in buffer_rows:
+        ttn_val = entry["TTN"]
+        if ttn_val not in existing:
+            now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
+            new_entry = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": ""}
+            append_csv_row(LOCAL_WAREHOUSE_FILE, new_entry, WAREHOUSE_HEADERS)
+            next_row += 1
+    print("Local warehouse file оновлено з буфера.")
+
+def update_local_office_from_google():
+    try:
+        records = worksheet_ttn.get_all_values()  # включаючи заголовок
+        office_rows = []
+        for i, row in enumerate(records, start=1):
+            if i == 1:
+                continue  # пропускаємо заголовок
+            office_rows.append({
+                "row": str(i),
+                "TTN": row[0] if len(row) > 0 else "",
+                "Date": row[1] if len(row) > 1 else "",
+                "Username": row[2] if len(row) > 2 else ""
+            })
+        write_csv_file(LOCAL_OFFICE_FILE, OFFICE_HEADERS, office_rows)
+        print("Local office file оновлено з Google таблиці.")
+    except Exception as e:
+        print("Помилка оновлення локального файлу для офісу:", e)
+        notify_admins(f"Error updating local_office from Google Sheets: {e}")
+        raise
 
 # ======= Розсилка звітів підписникам =======
 def send_subscription_notifications():
@@ -411,25 +537,236 @@ def send_subscription_notifications():
     now = datetime.now(tz)
     current_time_str = now.strftime("%H:%M")
     today_str = now.strftime("%Y-%m-%d")
-    all_users = get_all_users_data()
-    for chat_id, info in all_users.items():
-        report_time = info.get("time", "")
-        if not report_time:
+    users = get_all_users_data()
+    for chat_id, info in users.items():
+        rt = info.get("time", "")
+        if not rt:
             continue
-        if current_time_str == report_time:
-            last_sent = info.get("last_sent", "")
-            if last_sent != today_str:
+        if current_time_str == rt:
+            if info.get("last_sent", "") != today_str:
                 try:
-                    col_a = worksheet_ttn.col_values(1)[1:]
-                    count_ttn = sum(1 for x in col_a if x.strip() != "")
+                    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+                    count_ttn = sum(1 for r in office_rows if r["TTN"].strip() != "")
                 except Exception as e:
                     count_ttn = "Невідомо (помилка)"
                     notify_admins(f"Error counting TTН for chat {chat_id}: {e}")
                 bot.send_message(chat_id, f"За сьогодні оброблено TTН: {count_ttn}")
-                role, username, report_time, _ , admin_flag = get_user_data(chat_id)
-                update_user_data(chat_id, role, username, report_time, today_str)
+                role, username, rt, _ , admin_flag = get_user_data(chat_id)
+                update_user_data(chat_id, role, username, rt, today_str)
 
-# ======= Періодична реініціалізація Google Таблиць =======
+# ======= Періодична реініціалізація Google Sheets (щогодини) =======
+def reinitialize_google_sheets():
+    global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_SHEETS_CREDENTIALS, scope)
+        client = gspread.authorize(creds)
+        sheet_ttn = client.open_by_url(GOOGLE_SHEET_URL)
+        worksheet_ttn = sheet_ttn.sheet1
+        sheet_users = client.open_by_url(GOOGLE_SHEET_URL_USERS)
+        worksheet_users = sheet_users.sheet1
+        load_users_cache()
+        print("Google Sheets reinitialized successfully.")
+    except Exception as e:
+        print("Error reinitializing Google Sheets:", e)
+        notify_admins(f"Error reinitializing Google Sheets: {e}")
+
+# ======= Функція відправлення сповіщень адміністраторам =======
+def get_admin_ids():
+    admins = []
+    users = get_all_users_data()
+    for tg_id, info in users.items():
+        if info.get("admin", False):
+            admins.append(tg_id)
+    try:
+        with open("admins.json", "w", encoding="utf-8") as f:
+            json.dump(admins, f)
+    except Exception as ex:
+        print("Error writing admins.json:", ex)
+    return admins
+
+def notify_admins(error_msg):
+    admin_ids = get_admin_ids()
+    if not admin_ids:
+        print("No admin IDs available to notify.")
+        return
+    global LAST_ERROR_NOTIFY
+    now = datetime.now()
+    interval = timedelta(minutes=10)
+    key = error_msg
+    last_time = LAST_ERROR_NOTIFY.get(key)
+    if last_time and now - last_time < interval:
+        return
+    LAST_ERROR_NOTIFY[key] = now
+    for admin_id in admin_ids:
+        try:
+            bot.send_message(admin_id, f"[ALERT] {error_msg}")
+        except Exception as e:
+            print(f"Failed to notify admin {admin_id}: {e}")
+
+LAST_ERROR_NOTIFY = {}
+
+# ======= Telegram-бот: Команди та обробники =======
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    chat_id = str(message.chat.id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    subscribe_info = (
+        "\n\nВи можете підписатися на звіт, ввівши команду /subscribe <час> "
+        "(наприклад, /subscribe 22:00). Якщо час не вказано – за замовчуванням 22:00. "
+        "Відписатися – /unsubscribe."
+    )
+    if role:
+        bot.send_message(chat_id,
+                         f"👋 Вітаю! Ваша роль: *{role}*.\n\n"
+                         "Змінити роль: /Office або /Cklad" + subscribe_info,
+                         parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id,
+                         "Цей бот спрощує роботу з TTН.\n\n"
+                         "Оберіть роль: /Office або /Cklad" + subscribe_info,
+                         parse_mode="Markdown")
+
+@bot.message_handler(commands=["Office"])
+def cmd_office(message):
+    chat_id = str(message.chat.id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    if not username:
+        username = message.from_user.username or ""
+    update_user_data(chat_id, "Офіс", username, report_time, last_sent)
+    bot.send_message(chat_id, "✅ Роль встановлено: Офіс. Надсилайте TTН для перевірки.", parse_mode="Markdown")
+
+@bot.message_handler(commands=["Cklad"])
+def cmd_cklad(message):
+    chat_id = str(message.chat.id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    if not username:
+        username = message.from_user.username or ""
+    update_user_data(chat_id, "Склад", username, report_time, last_sent)
+    bot.send_message(chat_id, "✅ Роль встановлено: Склад. Надсилайте TTН, вони потраплятимуть у буфер.", parse_mode="Markdown")
+
+@bot.message_handler(commands=["subscribe"])
+def cmd_subscribe(message):
+    chat_id = str(message.chat.id)
+    args = message.text.split()
+    sub_time = "22:00"
+    if len(args) > 1:
+        candidate = args[1]
+        if re.match(r'^\d{1,2}:\d{2}$', candidate):
+            parts = candidate.split(":")
+            hour = parts[0].zfill(2)
+            minute = parts[1]
+            sub_time = f"{hour}:{minute}"
+        else:
+            bot.send_message(chat_id, "Невірний формат часу. Використовуйте HH:MM, напр. 22:00.")
+            return
+    role, username, _, last_sent, admin_flag = get_user_data(chat_id)
+    if not role:
+        role = "Офіс"
+        if not username:
+            username = message.from_user.username or ""
+    update_user_data(chat_id, role, username, sub_time, last_sent)
+    bot.send_message(chat_id, f"Підписка активна: звіт о {sub_time}.")
+
+@bot.message_handler(commands=["unsubscribe"])
+def cmd_unsubscribe(message):
+    chat_id = str(message.chat.id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    if not role:
+        bot.send_message(chat_id, "Спочатку встановіть роль (/start).")
+        return
+    update_user_data(chat_id, role, username, "", last_sent)
+    bot.send_message(chat_id, "Ви відписалися від звітів.")
+
+@bot.message_handler(content_types=["photo"])
+def handle_barcode_image(message):
+    chat_id = str(message.chat.id)
+    role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    if not role:
+        bot.send_message(chat_id, "Спочатку встановіть роль (/start).")
+        return
+    file_info = bot.get_file(message.photo[-1].file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    np_arr = np.frombuffer(downloaded_file, np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    try:
+        barcodes = decode(img)
+        if not barcodes:
+            bot.send_message(chat_id, "❌ Не вдалося розпізнати штрих-коди!")
+            return
+        success_count = 0
+        error_count = 0
+        for barcode in barcodes:
+            try:
+                ttn_raw = barcode.data.decode("utf-8")
+                digits = re.sub(r"\D", "", ttn_raw)
+                # Перевірка: TTН має містити від 10 до 18 цифр
+                if not digits or not (10 <= len(digits) <= 18):
+                    continue
+                if role == "Склад":
+                    add_ttn_to_buffer(digits)
+                    process_buffer(chat_id)
+                else:
+                    check_ttn_in_local_office(chat_id, digits)
+                success_count += 1
+            except Exception as inner_e:
+                error_count += 1
+        bot.send_message(chat_id, f"Оброблено штрих-кодів: успішно: {success_count}, з помилками: {error_count}")
+    except Exception as e:
+        bot.send_message(chat_id, "❌ Помилка обробки зображення, спробуйте ще раз!")
+        print(e)
+        notify_admins(f"Error in handle_barcode_image for chat {chat_id}: {e}")
+
+@bot.message_handler(func=lambda m: True)
+def handle_text_message(message):
+    if message.text.startswith("/"):
+        return
+    chat_id = str(message.chat.id)
+    digits = re.sub(r"\D", "", message.text)
+    if digits and (10 <= len(digits) <= 18):
+        role, username, report_time, last_sent, admin_flag = get_user_data(chat_id)
+        if not role:
+            bot.send_message(chat_id, "Спочатку встановіть роль (/start)")
+            return
+        if role == "Склад":
+            add_ttn_to_buffer(digits)
+            process_buffer(chat_id)
+        else:
+            check_ttn_in_local_office(chat_id, digits)
+
+def handle_ttn_logic(chat_id, ttn, username):
+    role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
+    if role == "Склад":
+        add_ttn_to_buffer(ttn)
+        process_buffer(chat_id)
+    elif role == "Офіс":
+        check_ttn_in_local_office(chat_id, ttn)
+    else:
+        bot.send_message(chat_id, "Спочатку встановіть роль (/start)")
+
+# ======= Розсилка звітів для підписників =======
+def send_subscription_notifications():
+    tz = pytz.timezone("Europe/Kiev")
+    now = datetime.now(tz)
+    current_time = now.strftime("%H:%M")
+    today_str = now.strftime("%Y-%m-%d")
+    users = get_all_users_data()
+    for chat_id, info in users.items():
+        rt = info.get("time", "")
+        if not rt:
+            continue
+        if current_time == rt:
+            if info.get("last_sent", "") != today_str:
+                try:
+                    _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
+                    count_ttn = sum(1 for r in office_rows if r["TTN"].strip() != "")
+                except Exception as e:
+                    count_ttn = "Невідомо (помилка)"
+                    notify_admins(f"Error counting TTН for chat {chat_id}: {e}")
+                bot.send_message(chat_id, f"За сьогодні оброблено TTН: {count_ttn}")
+                role, username, rt, _ , admin_flag = get_user_data(chat_id)
+                update_user_data(chat_id, role, username, rt, today_str)
+
+# ======= Періодична реініціалізація Google Sheets =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
     try:
@@ -465,13 +802,6 @@ def run_scheduler():
     while True:
         schedule.run_pending()
         time.sleep(30)
-
-# ======= Функція run_clear_ttn_sheet_with_tz =======
-def run_clear_ttn_sheet_with_tz():
-    tz_kiev = pytz.timezone("Europe/Kiev")
-    now_kiev = datetime.now(tz_kiev)
-    if now_kiev.strftime("%H:%M") == "00:00":
-        clear_ttn_sheet()
 
 # ======= Основна функція =======
 def main():
