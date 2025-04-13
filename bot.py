@@ -29,9 +29,9 @@ from config import (
 # ======= Глобальні змінні для локальних файлів =======
 LOCAL_OFFICE_FILE = "local_office.csv"       # для офісу
 LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # для складу (індексація)
-LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл (тепер з полями: TTN і Username)
+LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл (тепер з полями: TTN та Username)
 
-# Заголовки. Зверніть увагу: для буфера додано стовпець Username.
+# Заголовки. Для буфера додаємо стовпець Username.
 OFFICE_HEADERS = ["row", "TTN", "Date", "Username"]
 WAREHOUSE_HEADERS = ["row", "TTN", "Date", "Username"]
 BUFFER_HEADERS = ["TTN", "Username"]
@@ -196,19 +196,33 @@ def notify_admins(error_msg):
 LAST_ERROR_NOTIFY = {}
 
 # ======= Функція очищення таблиць з TTН (але не таблиці користувачів) =======
+from gspread.utils import rowcol_to_a1
+
 def clear_ttn_sheet():
     """
-    Очищає дані з Google таблиці TTН (залишаючи заголовок, без форматування)
-    та локальні файли (local_office.csv і local_warehouse.csv), зберігаючи заголовки.
+    Очищає дані з Google таблиці TTН, видаляючи всі значення та форматування клітинок,
+    залишаючи лише заголовок.
+    Також очищає локальні файли (local_office.csv та local_warehouse.csv), зберігаючи заголовки.
     """
     try:
-        # Зберігаємо заголовок
+        # Зберігаємо заголовок з першого рядка
         header = worksheet_ttn.row_values(1)
-        # Очищаємо весь вміст, включно з форматуванням
+        # Очищаємо всі значення (але не форматування)
         worksheet_ttn.clear()
+        # Визначаємо діапазон для очищення форматування
+        row_count = worksheet_ttn.row_count
+        col_count = worksheet_ttn.col_count
+        cell_range = "A1:" + rowcol_to_a1(row_count, col_count)
+        # Скидаємо форматування — встановлюємо фон білим, текст чорним, вирівнювання вліво
+        default_format = {
+            "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+            "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}},
+            "horizontalAlignment": "LEFT",
+        }
+        worksheet_ttn.format(cell_range, default_format)
         # Відновлюємо заголовок
         worksheet_ttn.append_row(header)
-        print("Google Sheet TTН таблиця очищена.")
+        print("Google Sheet TTН таблиця очищена та форматування скинуто.")
     except Exception as e:
         print("Error clearing Google Sheet TTН table:", e)
         notify_admins(f"Error clearing Google Sheet TTН table: {e}")
@@ -336,7 +350,7 @@ def start_buffer_timer(chat_id):
             threading.Thread(target=buffer_timer_thread, args=(chat_id,), daemon=True).start()
 
 def buffer_timer_thread(chat_id):
-    time.sleep(5)  # 5-секундна затримка для акумуляції нових TTН у буфері
+    time.sleep(5)  # 5-секундна затримка для акумуляції TTН у буфері
     process_buffer(chat_id)
     global BUFFER_PROCESSING_TIMER_RUNNING
     with BUFFER_PROCESSING_LOCK:
@@ -351,7 +365,7 @@ def process_buffer(chat_id):
       3. Оновлює local_office.csv із Google таблиці.
       4. Порівнює TTН з буфера з даними з local_office.csv,
          формуючи списки доданих і не доданих.
-      5. Надсилає повідомлення користувачу (Склад) з переліком (кожен код на новому рядку).
+      5. Надсилає повідомлення користувачу (Склад) з переліком (кожен код з нового рядка).
       6. Очищає буфер.
     """
     try:
@@ -385,7 +399,7 @@ def process_buffer(chat_id):
             added.append(ttn_val)
         else:
             not_added.append(ttn_val)
-    # Формуємо повідомлення: кожен код з нового рядка
+    # Формуємо повідомлення: кожен TTН з нового рядка
     msg = "Оновлення:\n"
     if added:
         msg += "Додано:\n" + "\n".join(added) + "\n"
@@ -565,9 +579,9 @@ def handle_text_message(message):
 # ======= Функції звітування та очищення TTН =======
 def send_subscription_notifications():
     """
-    Перевіряє час підписки кожного користувача і, якщо настав час,
+    Перевіряє час підписки кожного користувача та, якщо настав час,
     надсилає повідомлення з кількістю TTН (з local_office.csv) доданих за день.
-    Після відправлення повідомлення поле last_sent оновлюється, щоб не надсилати повторно.
+    Після відправлення поле last_sent оновлюється, щоб не надсилати повторно.
     """
     tz = pytz.timezone("Europe/Kiev")
     now = datetime.now(tz)
@@ -592,11 +606,11 @@ def send_subscription_notifications():
 
 def run_clear_ttn_sheet_with_tz():
     """
-    Якщо київський час показує 00:00, викликається очищення Google таблиці та локальних файлів TTН.
+    Якщо київський час показує 00:00, викликається очищення Google таблиці TTН та локальних файлів.
     """
     tz_kiev = pytz.timezone("Europe/Kiev")
     now_kiev = datetime.now(tz_kiev)
-    if now_kiev.strftime("%H:%M") == "00:00":
+    if now_kiev.strftime("%H:%M") == "00:15":
         clear_ttn_sheet()
 
 def reinitialize_google_sheets():
