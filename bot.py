@@ -205,7 +205,7 @@ def update_local_warehouse_from_buffer():
         for entry in buffer_rows:
             ttn_val = entry["TTN"]
             if ttn_val not in existing_ttns:
-                now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%H:%M:%S")
+                now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
                 new_row = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": ""}
                 append_csv_row(LOCAL_WAREHOUSE_FILE, new_row, WAREHOUSE_HEADERS)
                 next_row += 1
@@ -504,7 +504,7 @@ def update_local_warehouse_from_buffer():
     for entry in buffer_rows:
         ttn_val = entry["TTN"]
         if ttn_val not in existing:
-            now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%H:%M:%S")
+            now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%Y-%m-%d %H:%M:%S")
             new_entry = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": ""}
             append_csv_row(LOCAL_WAREHOUSE_FILE, new_entry, WAREHOUSE_HEADERS)
             next_row += 1
