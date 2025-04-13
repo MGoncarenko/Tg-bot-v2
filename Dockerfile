@@ -1,19 +1,15 @@
 FROM python:3.11-slim
 
-# Оновлюємо індекс пакетів і встановлюємо потрібні бібліотеки
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tzdata \
+# Оновлюємо індекс пакетів і встановлюємо потрібні бібліотеки:
+# 1) libzbar0 – для pyzbar (штрих-коди)
+# 2) libgl1-mesa-glx, libsm6, libxext6, libxrender-dev – для OpenCV
+RUN apt-get update && apt-get install -y \
     libzbar0 \
     libgl1-mesa-glx \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-# Встановлюємо часову зону на Europe/Kiev
-ENV TZ=Europe/Kiev
-RUN ln -snf /usr/share/zoneinfo/Europe/Kiev /etc/localtime && echo "Europe/Kiev" > /etc/timezone
 
 # Створюємо робочу директорію
 WORKDIR /app
@@ -22,8 +18,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копіюємо весь проєкт
+# Копіюємо весь проєкт (за винятком того, що у .dockerignore)
 COPY . .
+
+RUN pip freeze
 
 # Запускаємо бот
 CMD ["python", "bot.py"]
