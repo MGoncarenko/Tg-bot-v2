@@ -1,25 +1,33 @@
-# Використовуємо офіційний образ Python (3.9-slim або будь-яку іншу потрібну версію)
+# Використовуємо офіційний образ Python (3.9-slim або потрібну версію)
 FROM python:3.9-slim
 
-# Встановлюємо змінні оточення. PYTHONUNBUFFERED=1 гарантує негайний вивід логів, TZ задає часовий пояс як Київський.
+# Встановлюємо змінні оточення
 ENV PYTHONUNBUFFERED=1
 ENV TZ=Europe/Kiev
 
-# Оновлюємо apt-кеш, встановлюємо tzdata для роботи з часовими поясами
-RUN apt-get update && apt-get install -y tzdata && \
-    ln -sf /usr/share/zoneinfo/Europe/Kiev /etc/localtime && \
-    dpkg-reconfigure -f noninteractive tzdata && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Оновлення системи, встановлення tzdata і бібліотек для OpenCV
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    libgl1 \
+    libglib2.0-0 \
+    # Якщо потрібно, можна додати сюди інші залежності для OpenCV:
+    # libsm6 libxext6 libxrender-dev
+    && ln -sf /usr/share/zoneinfo/Europe/Kiev /etc/localtime \
+    && dpkg-reconfigure -f noninteractive tzdata \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Встановлюємо робочу директорію в контейнері
+# Вказуємо робочу директорію
 WORKDIR /app
 
-# Копіюємо файл залежностей та встановлюємо їх
+# Копіюємо файл із залежностями
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Копіюємо увесь проект у контейнер
+# Встановлюємо залежності Python
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# Копіюємо весь код у контейнер
 COPY . /app
 
-# Вказуємо команду для запуску бота
+# Вказуємо команду за замовчуванням
 CMD ["python", "bot.py"]
