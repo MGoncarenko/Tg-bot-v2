@@ -765,6 +765,13 @@ def send_subscription_notifications():
                 role, username, rt, _ , admin_flag = get_user_data(chat_id)
                 update_user_data(chat_id, role, username, rt, today_str)
 
+# ======= Перевірка чи не настав 00:00 =======
+def run_clear_ttn_sheet_with_tz():
+    tz_kiev = pytz.timezone("Europe/Kiev")
+    now_kiev = datetime.now(tz_kiev)
+    if now_kiev.strftime("%H:%M") == "00:00":
+        clear_ttn_sheet()
+
 # ======= Періодична реініціалізація Google Sheets =======
 def reinitialize_google_sheets():
     global creds, client, sheet_ttn, worksheet_ttn, sheet_users, worksheet_users
