@@ -17,7 +17,7 @@ import pytz
 from flask import Flask
 
 # ======= Імпорт конфігурації =======
-# Файл config.py повинен містити:
+# Файл config.py має містити:
 # TOKEN, GOOGLE_SHEETS_CREDENTIALS, GOOGLE_SHEET_URL, GOOGLE_SHEET_URL_USERS
 from config import (
     TOKEN,
@@ -28,12 +28,13 @@ from config import (
 
 # ======= Глобальні змінні для локальних файлів =======
 LOCAL_OFFICE_FILE = "local_office.csv"       # дані для офісу
-LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # дані для складу (індексація)
+LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # дані для складу (з індексацією)
 LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл
 
+# Оновлено: тепер буфер містить TTН та Username
 OFFICE_HEADERS = ["row", "TTN", "Date", "Username"]
 WAREHOUSE_HEADERS = ["row", "TTN", "Date", "Username"]
-BUFFER_HEADERS = ["TTN"]
+BUFFER_HEADERS = ["TTN", "Username"]
 
 # ======= Функції для роботи з CSV файлами =======
 def ensure_local_file(filename, headers):
@@ -263,9 +264,10 @@ def update_local_warehouse_from_buffer():
             next_row = 2
         for entry in buffer_rows:
             ttn_val = entry["TTN"]
+            username_val = entry.get("Username", "")
             if ttn_val not in existing_ttns:
                 now = datetime.now(pytz.timezone("Europe/Kiev")).strftime("%H:%M:%S")
-                new_row = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": ""}
+                new_row = {"row": str(next_row), "TTN": ttn_val, "Date": now, "Username": username_val}
                 append_csv_row(LOCAL_WAREHOUSE_FILE, new_row, WAREHOUSE_HEADERS)
                 next_row += 1
         print("Local warehouse file updated from buffer.")
@@ -324,7 +326,7 @@ def process_buffer(chat_id):
       2. Пушить нові записи (за індексацією) з local_warehouse.csv до Google Sheet.
       3. Оновлює local_office.csv із Google таблиці.
       4. Порівнює TTН з буфера з даними з local_office.csv, формуючи списки доданих і не доданих.
-      5. Відправляє повідомлення користувачу (роль "Склад") із підсумковою інформацією.
+      5. Надсилає повідомлення користувачу (роль "Склад") – кожен TTН з нового рядка.
       6. Очищає буфер.
     """
     try:
@@ -361,26 +363,29 @@ def process_buffer(chat_id):
             added.append(ttn_val)
         else:
             not_added.append(ttn_val)
-    # 5. Надсилаємо повідомлення користувачу (Склад)
-    msg = "Оновлення:\n"
+    # 5. Формуємо повідомлення: кожен TTН з нового рядка
+    msg_lines = []
     if added:
-        msg += "Додано: " + ", ".join(added) + "\n"
+        msg_lines.append("Додано:")
+        msg_lines.extend(added)
     if not_added:
-        msg += "Не додано: " + ", ".join(not_added)
+        msg_lines.append("Не додано:")
+        msg_lines.extend(not_added)
+    msg = "\n".join(msg_lines)
     bot.send_message(chat_id, msg)
     # 6. Очищаємо буфер
     write_csv_file(LOCAL_BUFFER_FILE, BUFFER_HEADERS, [])
     print("Buffer cleared.")
 
-def add_ttn_to_buffer(ttn):
+def add_ttn_to_buffer(ttn, username):
     """
-    Додає TTН до буферного файлу, якщо ще не існує.
+    Додає TTН та нік користувача до буферного файлу, якщо TTН ще не існує.
     """
     _, buffer_rows = read_csv_file(LOCAL_BUFFER_FILE)
     existing = {r["TTN"] for r in buffer_rows}
     if ttn not in existing:
-        append_csv_row(LOCAL_BUFFER_FILE, {"TTN": ttn}, BUFFER_HEADERS)
-        print(f"TTН {ttn} додано до буфера.")
+        append_csv_row(LOCAL_BUFFER_FILE, {"TTN": ttn, "Username": username}, BUFFER_HEADERS)
+        print(f"TTН {ttn} додано до буфера з Username {username}.")
 
 def check_ttn_in_local_office(chat_id, ttn):
     """
@@ -396,7 +401,7 @@ def check_ttn_in_local_office(chat_id, ttn):
 def handle_ttn_logic(chat_id, ttn, username):
     role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
     if role == "Склад":
-        add_ttn_to_buffer(ttn)
+        add_ttn_to_buffer(ttn, username)
         # Запускаємо 5-секундну затримку для акумуляції нових записів
         start_buffer_timer(chat_id)
     elif role == "Офіс":
@@ -510,7 +515,7 @@ def handle_barcode_image(message):
                 if not digits or not (10 <= len(digits) <= 18):
                     continue
                 if role == "Склад":
-                    add_ttn_to_buffer(digits)
+                    add_ttn_to_buffer(digits, username)
                     start_buffer_timer(chat_id)  # Запускаємо таймер обробки буфера
                 else:
                     check_ttn_in_local_office(chat_id, digits)
@@ -535,7 +540,7 @@ def handle_text_message(message):
             bot.send_message(chat_id, "Спочатку встановіть роль за допомогою /start")
             return
         if role == "Склад":
-            add_ttn_to_buffer(digits)
+            add_ttn_to_buffer(digits, username)
             start_buffer_timer(chat_id)
         else:
             check_ttn_in_local_office(chat_id, digits)
@@ -606,7 +611,7 @@ def run_scheduler():
         time.sleep(30)
 
 def main():
-    # При старті оновлюємо обидва локальні файли з Google Sheets
+    # При старті оновлюємо обидва локальні файли з даними з Google Sheets
     update_local_office_from_google()
     update_local_warehouse_from_google()
     
