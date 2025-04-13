@@ -15,6 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import schedule
 import pytz
 from flask import Flask
+from gspread.utils import rowcol_to_a1
 
 # ======= Імпорт конфігурації =======
 # Файл config.py повинен містити:
@@ -29,7 +30,7 @@ from config import (
 # ======= Глобальні змінні для локальних файлів =======
 LOCAL_OFFICE_FILE = "local_office.csv"       # для офісу
 LOCAL_WAREHOUSE_FILE = "local_warehouse.csv"  # для складу (індексація)
-LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл (тепер з полями: TTN та Username)
+LOCAL_BUFFER_FILE = "local_buffer.csv"        # буферний файл (тепер з полями: TTН та Username)
 
 # Заголовки. Для буфера додаємо стовпець Username.
 OFFICE_HEADERS = ["row", "TTN", "Date", "Username"]
@@ -196,8 +197,6 @@ def notify_admins(error_msg):
 LAST_ERROR_NOTIFY = {}
 
 # ======= Функція очищення таблиць з TTН (але не таблиці користувачів) =======
-from gspread.utils import rowcol_to_a1
-
 def clear_ttn_sheet():
     """
     Очищає дані з Google таблиці TTН, видаляючи всі значення та форматування клітинок,
@@ -207,13 +206,12 @@ def clear_ttn_sheet():
     try:
         # Зберігаємо заголовок з першого рядка
         header = worksheet_ttn.row_values(1)
-        # Очищаємо всі значення (але не форматування)
+        # Очищаємо всі значення та форматування
         worksheet_ttn.clear()
-        # Визначаємо діапазон для очищення форматування
+        # Визначаємо діапазон для скидання форматування
         row_count = worksheet_ttn.row_count
         col_count = worksheet_ttn.col_count
         cell_range = "A1:" + rowcol_to_a1(row_count, col_count)
-        # Скидаємо форматування — встановлюємо фон білим, текст чорним, вирівнювання вліво
         default_format = {
             "backgroundColor": {"red": 1, "green": 1, "blue": 1},
             "textFormat": {"foregroundColor": {"red": 0, "green": 0, "blue": 0}},
@@ -235,7 +233,6 @@ def clear_ttn_sheet():
         notify_admins(f"Error clearing local TTН files: {e}")
 
 # ======= Функції для роботи з локальними файлами TTН =======
-
 def update_local_office_from_google():
     """
     Зчитує дані з Google таблиці TTН та записує у local_office.csv.
@@ -365,7 +362,7 @@ def process_buffer(chat_id):
       3. Оновлює local_office.csv із Google таблиці.
       4. Порівнює TTН з буфера з даними з local_office.csv,
          формуючи списки доданих і не доданих.
-      5. Надсилає повідомлення користувачу (Склад) з переліком (кожен код з нового рядка).
+      5. Надсилає повідомлення користувачу (Склад) з переліком (кожен TTН з нового рядка).
       6. Очищає буфер.
     """
     try:
@@ -520,6 +517,24 @@ def cmd_unsubscribe(message):
         return
     update_user_data(chat_id, role, username, "", last_sent)
     bot.send_message(chat_id, "Ви успішно відписалися від звітів.")
+
+@bot.message_handler(commands=["help"])
+def cmd_help(message):
+    chat_id = str(message.chat.id)
+    help_text = (
+        "Доступні команди:\n\n"
+        "/start - Початкове налаштування бота та вибір ролі.\n"
+        "/Office - Встановити роль 'Офіс'.\n"
+        "/Cklad - Встановити роль 'Склад'.\n"
+        "/subscribe <час> - Підписатися на щоденний звіт (наприклад, /subscribe 22:00). Якщо час не вказано – за замовчуванням 22:00.\n"
+        "/unsubscribe - Відписатися від звітів.\n"
+        "/help - Показати це довідкове повідомлення.\n\n"
+        "Додатково:\n"
+        "• Бот автоматично обробляє TTН, надсилані як текст або фото (штрих-коди).\n"
+        "• Для ролі 'Склад' TTН накопичуються у буфер і після 5-секундної затримки додаткові записи пушаться до Google таблиці.\n"
+        "• Щоденний звіт надсилається користувачам, які підписані, з підрахунком TTН за день."
+    )
+    bot.send_message(chat_id, help_text)
 
 @bot.message_handler(content_types=["photo"])
 def handle_barcode_image(message):
