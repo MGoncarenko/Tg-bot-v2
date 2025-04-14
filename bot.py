@@ -424,9 +424,9 @@ def check_ttn_in_local_office(chat_id, ttn):
     _, office_rows = read_csv_file(LOCAL_OFFICE_FILE)
     for row in office_rows:
         if row["TTN"] == ttn:
-            bot.send_message(chat_id, f"TTН {ttn} знайдено на рядку {row['row']}.")
+            bot.send_message(chat_id, f"✅TTН {ttn} на рядку {row['row']}.")
             return
-    bot.send_message(chat_id, f"TTН {ttn} не знайдено в локальному файлі.")
+    bot.send_message(chat_id, f"❌TTН {ttn} не знайдено.")
 
 def handle_ttn_logic(chat_id, ttn, username):
     role, usern, report_time, last_sent, admin_flag = get_user_data(chat_id)
