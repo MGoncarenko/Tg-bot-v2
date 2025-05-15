@@ -1,10 +1,11 @@
-pyTelegramBotAPI
-gspread
-oauth2client
-opencv-python
-numpy
-pyzbar
-schedule
-pytz
-flask
-gspread-formatting
+# ── pinned to the last-known-good 2025-04 state ──
+pyTelegramBotAPI==4.26.0        # 4.27.0 змінив timeout-handled polling  :contentReference[oaicite:0]{index=0}
+gspread==6.1.4                  # 6.2.x ввів декілька breaking-changes   :contentReference[oaicite:1]{index=1}
+oauth2client==4.1.3             # остання стабільна (не змінювалась)
+opencv-python==4.10.0.84        # 4.11.0.* оновив core и codec API       :contentReference[oaicite:2]{index=2}
+numpy==1.26.4                   # сумісна з OpenCV 4.10
+pyzbar==0.1.9                   # остання, але явно фіксуємо            :contentReference[oaicite:3]{index=3}
+schedule==1.2.2                 # дрібні bug-fixes, безпечна            :contentReference[oaicite:4]{index=4}
+pytz==2024.2                    # 2025.x містить нові зони/offsetи      :contentReference[oaicite:5]{index=5}
+flask==2.3.4                    # 3.0 ще у b-стадії
+gspread-formatting==1.1.2       # сумісна з gspread ≤ 6.1.x
