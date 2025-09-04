@@ -16,6 +16,13 @@ import schedule
 import pytz
 from flask import Flask
 from gspread.utils import rowcol_to_a1
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
 
 # ======= Імпорт конфігурації =======
 # Файл config.py повинен містити:
@@ -646,47 +653,70 @@ def reinitialize_google_sheets():
         print("Error reinitializing Google Sheets:", e)
         notify_admins(f"Error reinitializing Google Sheets: {e}")
 
-def run_bot_polling():
-    while True:
-        try:
-            bot.polling()
-        except Exception as e:
-            error_text = f"Polling error: {e}"
-            print(error_text)
-            notify_admins(error_text)
-            reinitialize_google_sheets()
-            time.sleep(10)
+def run_bot():
+    """Стабільний запуск полінгу"""
+    try:
+        log.info("Starting Telegram bot with infinity_polling()...")
+        bot.infinity_polling(
+            timeout=20,
+            long_polling_timeout=30,
+            skip_pending=True,
+            allowed_updates=['message', 'callback_query', 'photo']
+        )
+    except Exception as e:
+        log.exception(f"Bot polling crashed: {e}")
+        notify_admins(f"Polling crashed: {e}")
+        time.sleep(10)
+        run_bot()  # перезапуск
 
-def run_scheduler():
+def run_scheduler_safe():
     schedule.every().minute.do(send_subscription_notifications)
     schedule.every().minute.do(run_clear_ttn_sheet_with_tz)
     schedule.every().hour.do(reinitialize_google_sheets)
+
+    log.info("Scheduler started.")
     while True:
-        schedule.run_pending()
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            log.exception(f"Scheduler error: {e}")
+            notify_admins(f"Scheduler error: {e}")
         time.sleep(30)
 
 # ======= Основна функція =======
 def main():
-    # При старті оновлюємо обидва локальні файли з даними з Google Sheets
-    update_local_office_from_google()
-    update_local_warehouse_from_google()
-    
+    # При старті оновлюємо локальні файли з Google Sheets
+    try:
+        update_local_office_from_google()
+        update_local_warehouse_from_google()
+    except Exception as e:
+        log.exception(f"Init data load failed: {e}")
+        notify_admins(f"Init data load failed: {e}")
+
     admins = get_admin_ids()
     if admins:
-        print("Loaded admin IDs:", admins)
+        log.info(f"Loaded admin IDs: {admins}")
     else:
-        print("No admin IDs found.")
-    
+        log.warning("No admin IDs found.")
+
+    # Flask healthcheck-сервер
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+
+    # Telegram bot
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    
+
+    # Scheduler
+    scheduler_thread = threading.Thread(target=run_scheduler_safe, daemon=True)
+    scheduler_thread.start()
+
+    # Головний цикл просто чекає
     try:
-        run_scheduler()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
-        print("Shutting down gracefully (KeyboardInterrupt).")
+        log.info("Shutting down gracefully (KeyboardInterrupt).")
         import sys
         sys.exit(0)
 
