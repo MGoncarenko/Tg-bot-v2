@@ -4,8 +4,15 @@
 інакше — зі змінних оточення. Файл config.py лишається у .gitignore.
 """
 import os
+import sys
 
-try:  # локально/на проді часто є config.py поруч
+# Render монтує Secret Files у /etc/secrets/ (для Docker) — даємо змогу
+# імпортувати звідти config.py.
+SECRETS_DIR = "/etc/secrets"
+if os.path.isdir(SECRETS_DIR) and SECRETS_DIR not in sys.path:
+    sys.path.insert(0, SECRETS_DIR)
+
+try:  # локально/на проді часто є config.py поруч або у /etc/secrets
     import config as _cfg  # type: ignore
 except ImportError:  # на Render можна задати все через env
     _cfg = None

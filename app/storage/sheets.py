@@ -27,8 +27,11 @@ def _load_credentials() -> Credentials:
     if raw:
         return Credentials.from_service_account_info(json.loads(raw), scopes=_SCOPES)
     path = settings.GOOGLE_SHEETS_CREDENTIALS
-    if path and os.path.exists(path):
-        return Credentials.from_service_account_file(path, scopes=_SCOPES)
+    if path:
+        # Render монтує Secret Files у /etc/secrets/ — пробуємо і там за іменем файлу.
+        for candidate in (path, os.path.join(settings.SECRETS_DIR, os.path.basename(path))):
+            if os.path.exists(candidate):
+                return Credentials.from_service_account_file(candidate, scopes=_SCOPES)
     raise RuntimeError(
         "Не задано облікові дані Google. Вкажіть GOOGLE_SHEETS_CREDENTIALS_JSON "
         "(вміст JSON-ключа, зручно для Render) або GOOGLE_SHEETS_CREDENTIALS (шлях до файлу)."
