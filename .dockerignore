@@ -1,0 +1,27 @@
+# VCS / IDE
+.git
+.gitignore
+.claude/
+
+# Python кеш / venv
+__pycache__/
+*.py[cod]
+venv/
+env/
+*.venv/
+
+# Секрети (на Render підставляються у рантаймі, не запікаємо в образ)
+config.py
+*.json
+.env
+
+# Локальні дані / діагностика
+local_office.csv
+local_warehouse.csv
+local_buffer.csv
+diff_missing.csv
+debug_images/
+
+# Дев-інструменти й документація (не потрібні в образі)
+scripts/
+*.md

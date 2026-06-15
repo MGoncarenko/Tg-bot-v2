@@ -3,13 +3,12 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1
 ENV TZ=Europe/Kiev
 
+# opencv-python-headless потребує мінімум системних бібліотек;
+# zbar більше не потрібен (перейшли на zxing-cpp).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     libgl1 \
     libglib2.0-0 \
-    libzbar0 \
-    # За потреби інші пакети:
-    # libsm6 libxext6 libxrender-dev ...
     && ln -sf /usr/share/zoneinfo/Europe/Kiev /etc/localtime \
     && dpkg-reconfigure -f noninteractive tzdata \
     && apt-get clean \
@@ -22,4 +21,4 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 
 COPY . /app
 
-CMD ["python", "bot.py"]
+CMD ["python", "-m", "app.main"]

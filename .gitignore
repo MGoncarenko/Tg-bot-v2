@@ -1,6 +1,8 @@
-# Конфігураційні файли з API ключами
+# Конфігураційні файли з API ключами / секрети
 config.py
-data-avatar-455714-e9-2c45f3635e40.json
+.env
+# ключі сервісного акаунта Google та інші секрети
+*.json
 
 # Віртуальне середовище
 venv/
@@ -10,3 +12,10 @@ env/
 # Файли кешу Python
 __pycache__/
 *.py[cod]
+
+# Локальні CSV-кеші та діагностика
+local_office.csv
+local_warehouse.csv
+local_buffer.csv
+diff_missing.csv
+debug_images/

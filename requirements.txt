@@ -1,11 +1,18 @@
-# ── pinned to the last-known-good state ──
-pyTelegramBotAPI==4.26.0
-gspread==6.1.4
-oauth2client==4.1.3
-opencv-python==4.10.0.84
+# ── Telegram (async) ──
+aiogram>=3.13,<4
+aiohttp>=3.9            # keep-alive web-сервер (також залежність aiogram)
+
+# ── Штрих-коди ──
+zxing-cpp>=2.2          # головний декодер (import zxingcpp)
+opencv-python-headless==4.10.0.84
 numpy==1.26.4
-pyzbar==0.1.9
-schedule==1.2.2
-pytz==2024.2
-flask==2.3.3
-gspread-formatting==1.1.2
+
+# ── Google Sheets ──
+gspread>=6.1
+google-auth>=2.0        # заміна застарілого oauth2client
+
+# ── Планувальник ──
+APScheduler>=3.10
+
+# ── Час ──
+tzdata                  # zoneinfo на Windows/slim-образах
