@@ -22,6 +22,8 @@ TOKEN = _get("TOKEN")
 
 # ── Google Sheets ──
 GOOGLE_SHEETS_CREDENTIALS = _get("GOOGLE_SHEETS_CREDENTIALS")  # шлях до service-account .json
+# Альтернатива для хмари (Render): сам вміст JSON-ключа у змінній оточення.
+GOOGLE_SHEETS_CREDENTIALS_JSON = _get("GOOGLE_SHEETS_CREDENTIALS_JSON")
 GOOGLE_SHEET_URL = _get("GOOGLE_SHEET_URL")                    # таблиця ТТН
 GOOGLE_SHEET_URL_USERS = _get("GOOGLE_SHEET_URL_USERS")        # таблиця користувачів
 

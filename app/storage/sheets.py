@@ -3,7 +3,9 @@
 Усі методи синхронні/блокуючі — викликати з async-коду через
 asyncio.to_thread(...). Містить також мости Google <-> локальний CSV-кеш.
 """
+import json
 import logging
+import os
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -19,6 +21,20 @@ _SCOPES = [
 ]
 
 
+def _load_credentials() -> Credentials:
+    """Креди з env-змінної (вміст JSON) або з файлу за шляхом."""
+    raw = settings.GOOGLE_SHEETS_CREDENTIALS_JSON
+    if raw:
+        return Credentials.from_service_account_info(json.loads(raw), scopes=_SCOPES)
+    path = settings.GOOGLE_SHEETS_CREDENTIALS
+    if path and os.path.exists(path):
+        return Credentials.from_service_account_file(path, scopes=_SCOPES)
+    raise RuntimeError(
+        "Не задано облікові дані Google. Вкажіть GOOGLE_SHEETS_CREDENTIALS_JSON "
+        "(вміст JSON-ключа, зручно для Render) або GOOGLE_SHEETS_CREDENTIALS (шлях до файлу)."
+    )
+
+
 class Sheets:
     def __init__(self) -> None:
         self.client = None
@@ -26,9 +42,7 @@ class Sheets:
         self.users = None    # worksheet таблиці користувачів
 
     def connect(self) -> None:
-        creds = Credentials.from_service_account_file(
-            settings.GOOGLE_SHEETS_CREDENTIALS, scopes=_SCOPES
-        )
+        creds = _load_credentials()
         self.client = gspread.authorize(creds)
         self.ttn = self.client.open_by_url(settings.GOOGLE_SHEET_URL).sheet1
         self.users = self.client.open_by_url(settings.GOOGLE_SHEET_URL_USERS).sheet1

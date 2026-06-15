@@ -20,6 +20,11 @@ log = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    if not settings.TOKEN:
+        raise SystemExit(
+            "TOKEN не задано. Задайте змінну оточення TOKEN (Render) "
+            "або створіть config.py із config.example.py."
+        )
     lc.ensure_local_files()
     bot = create_bot()
 

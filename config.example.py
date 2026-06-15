@@ -1,12 +1,16 @@
 """Приклад config.py. Скопіюйте у config.py та заповніть (config.py у .gitignore).
 
 Альтернативно всі значення можна задати через змінні оточення з тими ж іменами
-(зручно для Render).
+(зручно для Render). Для Render найпростіше задати env-змінні:
+  TOKEN, GOOGLE_SHEET_URL, GOOGLE_SHEET_URL_USERS,
+  GOOGLE_SHEETS_CREDENTIALS_JSON  (увесь вміст JSON-ключа одним рядком).
 """
 
 TOKEN = "..."
 
-# Шлях до JSON-ключа сервісного акаунта Google
+# Локально — шлях до JSON-ключа сервісного акаунта Google.
+# На Render замість шляху задайте env-змінну GOOGLE_SHEETS_CREDENTIALS_JSON
+# зі вмістом цього JSON.
 GOOGLE_SHEETS_CREDENTIALS = "..."
 
 # Посилання на дві Google-таблиці
